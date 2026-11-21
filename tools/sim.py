@@ -32,6 +32,36 @@ def wrap(a):
     return (a + math.pi) % TAU - math.pi
 
 
+def seg_cyl(o, e, cx, cy, r, z0, z1):
+    """Parameter s in [0, 1] where segment o->e first enters the vertical cylinder (axis (cx, cy), radius r,
+    z0..z1), or None."""
+    dx, dy, dz = e[0] - o[0], e[1] - o[1], e[2] - o[2]
+    fx, fy = o[0] - cx, o[1] - cy
+    a = dx * dx + dy * dy
+    c = fx * fx + fy * fy - r * r
+    if a < 1e-12:
+        if c > 0:
+            return None
+        s1, s2 = 0.0, 1.0
+    else:
+        b = 2 * (fx * dx + fy * dy)
+        disc = b * b - 4 * a * c
+        if disc < 0:
+            return None
+        sq = math.sqrt(disc)
+        s1, s2 = (-b - sq) / (2 * a), (-b + sq) / (2 * a)
+        if s2 < 0 or s1 > 1:
+            return None
+        s1, s2 = max(0.0, s1), min(1.0, s2)
+    za, zb = o[2] + dz * s1, o[2] + dz * s2
+    if z0 <= za <= z1:
+        return s1
+    if (za > z1 and zb > z1) or (za < z0 and zb < z0):
+        return None
+    zc = z1 if za > z1 else z0   # enters through the top (or bottom) cap; za != zb so dz != 0
+    return (zc - o[2]) / dz
+
+
 class Mech:
     def __init__(self, i, pos, cfg):
         m = cfg["mech"]
@@ -104,6 +134,7 @@ class Sim:
         self.zone_phase = 0
         self._zone_setup()
         self.deaths = []  # (t, id)
+        self.st = {"shots": 0, "hits": 0, "dealt": 0.0, "taken": 0.0, "zone": 0.0}  # the bot's own match stats
         self.bot = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=sys.stderr if verbose else subprocess.DEVNULL, text=True, bufsize=1)
         self.outq = queue.Queue()
         threading.Thread(target=self._reader, daemon=True).start()
@@ -392,6 +423,8 @@ class Sim:
                                              "left": s["range"], "dmg": s["damage"] * (1 + 0.04 * min(m.cubes, 10))})
                     self._sound(m, "gun")
                     m.last_combat = self.t
+                    if m.id == self.me_id:
+                        self.st["shots"] += 1
             elif k == "lightning":
                 if trig and w["cooldown"] <= 0 and m.energy >= s["energy"]:
                     w["cooldown"] = s["cooldown"]
@@ -479,6 +512,12 @@ class Sim:
             rear = abs(wrap(b - obj.aim[0])) > math.pi / 2
             if rear:
                 dmg *= 1.5
+            if src is not None and src.id == self.me_id:
+                self.st["dealt"] += dmg
+                if weapon == "gun":
+                    self.st["hits"] += 1
+            if obj.id == self.me_id:
+                self.st["taken"] += dmg
             obj.hp -= dmg
             obj.last_combat = self.t
             obj.events.append({"type": "damaged", "amount": round(dmg, 2), "weapon": weapon, "bearing": b, "by": src.id if src else None, "rear": rear})
@@ -489,6 +528,8 @@ class Sim:
                 self._kill(obj, src)
         else:
             obj["hp"] -= dmg
+            if src is not None and src.id == self.me_id and weapon == "gun":
+                self.st["hits"] += 1  # crate hits count toward accuracy too
             if src:
                 src.events.append({"type": "hit", "target": obj["id"], "amount": dmg, "weapon": weapon})
             if obj["hp"] <= 0 and obj in self.crates:
@@ -515,33 +556,30 @@ class Sim:
 
     def step_projectiles(self):
         keep = []
+        pr = self.cfg.get("projectile", {}).get("gun_radius", 0.3)
+        cr = self.cfg["crates"].get("radius", 1.4) + pr
+        ch = self.cfg["crates"].get("height", 2.4)
         for p in self.projectiles:
             o = p["pos"]
             dist = math.hypot(*p["vel"]) * self.dt
             e = [o[k] + p["vel"][k] * self.dt for k in range(3)]
+            # first thing the segment o->e enters: a mech or a crate (exact segment-vs-cylinder)
             hit = None
             for m in self.mechs:
                 if not m.alive or m.id == p["by"]:
                     continue
-                # segment vs cylinder (sampled)
-                for s in (0.0, 0.25, 0.5, 0.75, 1.0):
-                    q = [o[k] + (e[k] - o[k]) * s for k in range(3)]
-                    if math.hypot(q[0] - m.pos[0], q[1] - m.pos[1]) < 2.8 and m.pos[2] <= q[2] <= m.pos[2] + 9:
-                        hit = (s, m)
-                        break
-                if hit:
-                    break
+                sc = 1 + 0.05 * m.cubes
+                s = seg_cyl(o, e, m.pos[0], m.pos[1], 2.5 * sc + pr, m.pos[2], m.pos[2] + 9 * sc)
+                if s is not None and (hit is None or s < hit[0]):
+                    hit = (s, m)
+            for c in self.crates:
+                s = seg_cyl(o, e, c["pos"][0], c["pos"][1], cr, c["pos"][2], c["pos"][2] + ch)
+                if s is not None and (hit is None or s < hit[0]):
+                    hit = (s, {"obj": c})
             if not self.nav.los(o, e if not hit else [o[k] + (e[k] - o[k]) * hit[0] for k in range(3)]):
                 continue
             if hit:
                 self._damage(self.mechs[p["by"]], hit[1], p["dmg"], "gun", o)
-                continue
-            for c in self.crates:
-                if math.hypot(e[0] - c["pos"][0], e[1] - c["pos"][1]) < 1.6 and c["pos"][2] <= e[2] <= c["pos"][2] + 2.6:
-                    self._damage(self.mechs[p["by"]], {"obj": c}, p["dmg"], "gun", o)
-                    hit = True
-                    break
-            if hit:
                 continue
             p["left"] -= dist
             p["pos"] = e
@@ -664,6 +702,8 @@ class Sim:
                     if math.dist(m.pos[:2], zc) > zr:
                         m.hp -= self.zdps * self.dt
                         m.last_combat = self.t
+                        if m is me:
+                            self.st["zone"] += self.zdps * self.dt
                         if m is me and self.tick % 20 == 0:
                             m.events.append({"type": "damaged", "amount": self.zdps, "weapon": "zone", "bearing": None, "by": None})
                         if m.hp <= 0:
@@ -701,7 +741,9 @@ class Sim:
         ts = sorted(self.times)
         return {"place": place, "points": 16 - place, "kills": me.kills, "t": round(self.t, 1), "cause": cause,
                 "cubes": me.cubes, "weapons": [w["kind"] for w in me.weapons if w],
-                "p50ms": round(ts[len(ts) // 2] * 1000, 2), "maxms": round(ts[-1] * 1000, 1), "late": self.late}
+                "p50ms": round(ts[len(ts) // 2] * 1000, 2), "maxms": round(ts[-1] * 1000, 1), "late": self.late,
+                "shots": self.st["shots"], "acc": round(self.st["hits"] / max(1, self.st["shots"]), 3),
+                "dealt": round(self.st["dealt"]), "taken": round(self.st["taken"]), "zone_dmg": round(self.st["zone"])}
 
 
 def main():

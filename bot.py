@@ -76,6 +76,9 @@ class Bot:
         self.scan_phase = self.rng.random() * TAU
         self.heavy_used = False
         self.last_heavy_t = -99.0
+        self.goal = None           # [key, best_dist, t_progress, hp, t_last_tracked] of the current loot/farm goal
+        self.bad_goals = {}        # key -> time until which we leave it alone (no progress)
+        self.known_pickups = {}    # id -> (kind, pos, t_seen): weapons we have seen (they never despawn)
         gc.collect()
         gc.freeze()
 
@@ -207,8 +210,13 @@ class Bot:
                 self.last_hit_t = t
             elif et == "take_failed":
                 self.bad_pickups[ev.get("id")] = t
+                if ev.get("reason") == "gone":
+                    self.known_pickups.pop(ev.get("id"), None)
             elif et == "took":
                 self.bad_pickups.pop(ev.get("id"), None)
+                self.known_pickups.pop(ev.get("id"), None)
+        for p in obs.get("pickups") or []:
+            self.known_pickups[p["id"]] = (p["kind"], p["pos"], t)
         for s in obs.get("sounds") or []:
             k = s.get("kind")
             if k in ("gun", "laser", "laser_charge", "lightning", "mortar", "step", "boost", "jet", "reload"):
@@ -802,61 +810,69 @@ class Bot:
         for dr in obs.get("drops") or []:
             dp = dr["pos"]
             dd = math.dist((x, y), dp[:2])
-            if dd < 170 and dr.get("lands_in", 0) < dd / 11.7 + 3 and ok(dp[:2]):
+            key = ("drop", dr["id"])
+            if dd < 170 and dr.get("lands_in", 0) < dd / 11.7 + 3 and ok(dp[:2]) and self._goal_ok(key):
                 if dd > dr.get("radius", 8) * 0.5:
-                    return self._navigate(dp[:2]), None, "drop"
+                    return self._go_goal(key, dd, dp), None, "drop"
                 return (0.0, 0.0), None, "capturing"
 
         if hurt:
             return self._heal(obs, zone_goal)
 
-        # cubes
-        best = None
-        for c in obs.get("cubes") or []:
-            cp = c["pos"]
-            if abs(cp[2] - z) > 3.5 and abs(cp[2] - self._ground(cp)) > 1:
-                continue
-            dd = math.dist((x, y), cp[:2])
-            if dd < 90 and ok(cp[:2]) and (best is None or dd < best[0]):
-                best = (dd, cp)
-        if best:
-            return self._navigate(best[1][:2]), None, "cube"
+        # cubes right next to us: quick grabs
+        cube = self._best_cube(obs, ok, 30.0)
+        if cube:
+            return self._go_goal(("cube", cube[1]["id"]), cube[0], cube[1]["pos"]), None, "cube"
 
-        # weapons worth taking
+        # a weapon for the empty slot (or a clearly better one): the biggest single gain in firepower.
+        # Remembered pickups count too while a slot is empty (weapons never despawn).
+        empty = me["weapons"][0] is None or me["weapons"][1] is None
         best = None
-        for p in obs.get("pickups") or []:
-            if p["id"] in self.bad_pickups and t - self.bad_pickups[p["id"]] < 20:
+        for pid, (kind, pp, ts) in self.known_pickups.items():
+            if pid in self.bad_pickups and t - self.bad_pickups[pid] < 20:
                 continue
-            if not self._want_weapon(p["kind"], wk):
+            if not self._want_weapon(kind, wk) or not self._goal_ok(("pick", pid)):
                 continue
-            pp = p["pos"]
-            if pp[2] - self._ground(pp) > 2.0 and pp[2] - z > 2.0:
-                if me["energy"] < 70:
-                    continue  # on a roof: only when we can jet up
+            seen_now = t - ts < 0.01
             dd = math.dist((x, y), pp[:2])
-            if dd < 110 and ok(pp[:2]) and (best is None or dd < best[0]):
-                best = (dd, pp)
+            if dd > (110.0 if seen_now else (250.0 if empty else 0.0)) or not ok(pp[:2]):
+                continue
+            if pp[2] - self._ground(pp) > 2.0 and pp[2] - z > 2.0 and me["energy"] < 70:
+                continue  # on a roof: only when we can jet up
+            if best is None or dd < best[0]:
+                best = (dd, pid, pp, seen_now)
         if best:
-            dd, pp = best
-            mv = self._navigate(pp[:2])
-            if pp[2] - z > 2.0 and dd < 12:
-                self.jet_until = max(self.jet_until, t + 1.2)
-                if me["grounded"]:
-                    self.want_jump = True
-            return mv, None, "weapon"
+            dd, pid, pp, seen_now = best
+            if not seen_now and dd < 25 and (self.nav is None or self.nav.los((x, y, z + self.eye), (pp[0], pp[1], pp[2] + 1.0))):
+                self.known_pickups.pop(pid, None)  # we would see it from here: someone took it
+            else:
+                mv = self._go_goal(("pick", pid), dd, pp)
+                if pp[2] - z > 2.0 and dd < 12:
+                    self.jet_until = max(self.jet_until, t + 1.2)
+                    if me["grounded"]:
+                        self.want_jump = True
+                return mv, None, "weapon"
 
-        # crates: shoot from range
+        # cubes
+        cube = self._best_cube(obs, ok, 90.0)
+        if cube:
+            return self._go_goal(("cube", cube[1]["id"]), cube[0], cube[1]["pos"]), None, "cube"
+
+        # crates: shoot from range (walk closer while something blocks the shot)
         best = None
         for c in obs.get("crates") or []:
             cp = c["pos"]
             dd = math.dist((x, y), cp[:2])
-            if dd < 70 and ok(cp[:2]) and (best is None or dd < best[0]):
-                best = (dd, cp)
+            if dd < 70 and ok(cp[:2]) and self._goal_ok(("crate", c["id"])) and (best is None or dd < best[0]):
+                best = (dd, c)
         if best:
-            dd, cp = best
+            dd, c = best
+            cp = c["pos"]
             self.farm_kind = "crate"
             p = (cp[0], cp[1], cp[2] + 1.2)
-            mv = (0.0, 0.0) if dd < 35 else self._navigate(cp[:2])
+            self._track_goal(("crate", c["id"]), dd, c.get("hp"))
+            see = self.nav is None or self.nav.los((x, y, z + self.muzzle), p)
+            mv = (0.0, 0.0) if dd < 35 and see else self._navigate(cp[:2])
             return mv, p, "crate"
 
         # NPC drones: two cubes each, shoot from outside their aggro range
@@ -864,11 +880,12 @@ class Bot:
             best = None
             for nn in npcs:
                 dd = math.dist((x, y), nn["pos"][:2])
-                if dd < 140 and ok(nn["pos"][:2]) and (best is None or dd < best[0]):
+                if dd < 140 and ok(nn["pos"][:2]) and self._goal_ok(("npc", nn["id"])) and (best is None or dd < best[0]):
                     best = (dd, nn)
             if best:
                 dd, nn = best
                 self.farm_kind = "npc"
+                self._track_goal(("npc", nn["id"]), max(dd, 85.0), nn.get("hp"))
                 p = nn["pos"]
                 aimp = (p[0] + nn["vel"][0] * dd / 252, p[1] + nn["vel"][1] * dd / 252, p[2] + 1.75)
                 if dd > 85:
@@ -896,8 +913,9 @@ class Bot:
         t = self.t
         for c in obs.get("cubes") or []:
             cp = c["pos"]
-            if math.dist((x, y), cp[:2]) < 25 and abs(cp[2] - z) < 3.5:
-                return self._navigate(cp[:2]), None, "heal cube"
+            dd = math.dist((x, y), cp[:2])
+            if dd < 25 and abs(cp[2] - z) < 3.5 and self._goal_ok(("cube", c["id"])):
+                return self._go_goal(("cube", c["id"]), dd, cp), None, "heal cube"
         recent = [(p, tt) for p, tt in self.last_seen.values() if t - tt < 25]
         if self.nav is not None and recent:
             if (self.cover is None or t - self.cover_t > 2.0) and self._heavy_ok():
@@ -921,6 +939,40 @@ class Bot:
             mx, my = self._navigate(nc)
             return mx * 0.4, my * 0.4  # 0.4 * 11.7 < 5 m/s: no footstep sound
         return (0.0, 0.0)
+
+    def _goal_ok(self, key):
+        return self.bad_goals.get(key, -1.0) < self.t
+
+    def _track_goal(self, key, d, hp=None):
+        """Watchdog for loot and farm goals: give up on one that has not got closer (or, for something we
+        shoot, lost HP) for 6 s, so the bot never stands at a wall or at a crate it cannot hit."""
+        t = self.t
+        g = self.goal
+        if g is None or g[0] != key or t - g[4] > 0.6:
+            self.goal = [key, d, t, hp, t]
+            return
+        g[4] = t
+        if d < g[1] - 2.0 or (hp is not None and g[3] is not None and hp < g[3] - 1.0):
+            g[1], g[2], g[3] = min(d, g[1]), t, hp
+        elif t - g[2] > 6.0:
+            self.bad_goals[key] = t + 45.0
+            self.goal = None
+
+    def _go_goal(self, key, d, p):
+        self._track_goal(key, d)
+        return self._navigate(p[:2])
+
+    def _best_cube(self, obs, ok, rng):
+        x, y, z = self.pos
+        best = None
+        for c in obs.get("cubes") or []:
+            cp = c["pos"]
+            if abs(cp[2] - z) > 3.5 and abs(cp[2] - self._ground(cp)) > 1:
+                continue
+            dd = math.dist((x, y), cp[:2])
+            if dd < rng and ok(cp[:2]) and self._goal_ok(("cube", c["id"])) and (best is None or dd < best[0]):
+                best = (dd, c)
+        return best
 
     def _ground(self, p):
         if self.nav is None:
