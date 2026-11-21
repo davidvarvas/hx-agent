@@ -83,7 +83,8 @@ class Bot:
         self.ret_latch = False
         self.focus_id, self.focus_t = None, -99.0
         self.loot_mem = {}         # id -> (kind, pos, last seen): weapons and cubes we saw
-        self.evade = False         # boost-strafing in a duel (energy hysteresis)
+        self.rear_hits = {}        # attacker id -> (bearing, time) of its last hit on our back
+        self.glance_until, self.glance_yaw, self.last_glance = -99.0, 0.0, -99.0
         gc.collect()
         gc.freeze()
 
@@ -155,7 +156,7 @@ class Bot:
             boost = me["energy"] > 45 and t - self.last_dmg_t < 1.0
         elif fight:
             move = self._fight_move(target, enemies, zone_goal, obs)
-            boost = self._evade_boost(target)
+            boost = me["energy"] > 45 and t - self.last_dmg_t < 1.0
             label = f"fight {target['id']}"
         else:
             move, aim_point, label = self._peaceful(obs, npcs, zone_goal)
@@ -178,6 +179,11 @@ class Bot:
             aim = self._lead_aim(target)
             if fight:
                 fire = self._fire_control(target, aim, enemies, obs)
+                g = self._glance(target, enemies)
+                if g is not None:  # look at the unseen mech hitting our back; keep a laser charge held
+                    aim = (g, 0.0)
+                    fire = [bool(f) and w is not None and w["kind"] == "laser" and (w.get("charge") or 0) > 0
+                            for f, w in zip(fire, me["weapons"])]
         if aim is None and aim_point is not None:
             aim = self._aim_at_point(aim_point)
             fire = self._fire_at_object(aim, aim_point, obs)
@@ -231,6 +237,8 @@ class Bot:
                         self.attackers[ev["by"]] = t
                     if ev.get("bearing") is not None:
                         self.threats.append((ev["bearing"], t, 3.0 if ev.get("rear") else 2.0))
+                        if ev.get("rear") and ev.get("by") is not None:
+                            self.rear_hits[ev["by"]] = (ev["bearing"], t)
             elif et == "hit":
                 self.last_hit_t = t
             elif et == "take_failed":
@@ -759,15 +767,19 @@ class Bot:
             return norm2(wx - x, wy - y)
         return norm2(gx - x, gy - y)
 
-    def _evade_boost(self, target):
-        """Boost-strafe while a mech can shoot at us: a faster mech is harder to hit. A gun and laser use no
-        energy, so spend it down to a small reserve; with lightning, keep the energy for its shots."""
-        energy = self.me["energy"]
-        if "lightning" in self._weapons():
-            return energy > 45 and self.t - self.last_dmg_t < 1.0
-        self.evade = energy > 20 if self.evade else energy > 45
-        threatened = self.t - self.last_dmg_t < 1.5 or (target["clear"] and target["aggressor"])
-        return self.evade and threatened
+    def _glance(self, target, enemies):
+        """A mech we cannot see hit our back (rear hits do 1.5x): turn to it briefly so it can be seen and fought."""
+        t = self.t
+        if t < self.glance_until:
+            return self.glance_yaw
+        if t - self.last_glance < 2.5 or self._enemy_health(target) < 0.3:
+            return None
+        known = {e["id"] for e in enemies}
+        for by, (bearing, tt) in self.rear_hits.items():
+            if t - tt < 0.6 and by != target["id"] and by not in known:
+                self.glance_yaw, self.glance_until, self.last_glance = bearing, t + 0.7, t
+                return bearing
+        return None
 
     def _heavy_ok(self):
         return not self.heavy_used and (time.perf_counter() - self.t0) < self.search_budget
