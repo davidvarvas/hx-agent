@@ -18,9 +18,9 @@ except Exception:  # numpy missing: run without a map
 TAU = 2 * math.pi
 DEBUG = bool(__import__('os').environ.get('BOTDEBUG'))
 
-WEAPON_VALUE = {"lightning": 3.0, "laser": 3.0, "gun": 1.0, "mortar": -1.0}
+WEAPON_VALUE = {"lightning": 3.0, "laser": 2.7, "mortar": 1.6, "gun": 0.0}
 UPGRADE_ORDER = [
-    "plating", "nanites", "armor", "gun_damage", "gun_rate", "lightning_efficiency", "laser_charge",
+    "plating", "armor", "nanites", "gun_damage", "gun_rate", "lightning_efficiency", "laser_charge",
     "laser_damage", "servos", "gyros", "gun_mag", "lightning_range", "sensors", "gun_velocity",
     "lightning_chain", "mortar_reload", "reactor", "capacitor", "jets", "mortar_velocity", "mortar_splash",
     "laser_pierce",
@@ -80,6 +80,8 @@ class Bot:
         self.scan_phase = self.rng.random() * TAU
         self.heavy_used = False
         self.last_heavy_t = -99.0
+        self.ret_latch = False
+        self.focus_id, self.focus_t = None, -99.0
         gc.collect()
         gc.freeze()
 
@@ -394,8 +396,12 @@ class Bot:
             score -= 0.25 if enemy["rear_angle"] > math.radians(self.mech["front_arc_deg"]) / 2 else 0.0
             if enemy["clear"] and self._enemy_health(enemy) <= 0.30:
                 score -= 1.2  # finish it: a kill is a placement and drops its cubes
+            if enemy["id"] == self.focus_id and self.t - self.focus_t < 1.0:
+                score -= 0.8  # focus fire: damage spread over several mechs just regenerates
             if score < best_score:
                 best, best_score = enemy, score
+        if best is not None:
+            self.focus_id, self.focus_t = best["id"], self.t
         return best
 
     def _should_fight(self, target, obs):
@@ -417,16 +423,17 @@ class Bot:
         return not early and advantage and target["d"] < gun_range * 0.5
 
     def _should_retreat(self, tgt, enemies):
-        my = self.me["hp"]
-        th = tgt.get("hp", self.mech["hp"])
-        close = [e for e in enemies if e["d"] < 120]
-        if self.hp_frac < 0.3 and th > my * 0.8:
+        """Hide and regenerate below 38% HP until 80% (or 60% after 12 s untouched); also take cover when three
+        enemies (two when under 60% HP) have a clear shot at us."""
+        hp = self.hp_frac
+        if hp < 0.38:
+            self.ret_latch = True
+        elif self.ret_latch and (hp > 0.80 or (self.t - self.last_dmg_t > 12.0 and hp > 0.60)):
+            self.ret_latch = False
+        if self.ret_latch:
             return True
-        if self.hp_frac < 0.55 and len(close) >= 2:
-            return True
-        if len(close) >= 3 and self.hp_frac < 0.85:
-            return True
-        return False
+        shooters = [e for e in enemies if e["d"] < 240 and e.get("clear")]
+        return len(shooters) >= 3 or (len(shooters) >= 2 and hp < 0.6)
 
     def _outnumbered(self, enemies):
         return sum(e["d"] < 170 and (e["clear"] or e["aggressor"]) for e in enemies) >= 2
@@ -1165,13 +1172,16 @@ class Bot:
         return self.nav.ground_at(p[0], p[1])
 
     def _want_weapon(self, kind, wk):
-        """Laser and lightning are wanted; a mortar never (a laser hit on its carrier does +60%). With both
-        slots full, the gun (or a mortar) makes room for the missing special."""
-        if kind in wk or kind in ("gun", "mortar"):
+        if kind in wk or kind == "gun" or kind == "mortar":
             return False
         if self.me["weapons"][1] is None or self.me["weapons"][0] is None:
             return True
-        return "gun" in wk or "mortar" in wk
+        # both full: swap the worse special for a better one
+        specials = [k for k in wk if k != "gun"]
+        if not specials:
+            return False
+        worst = min(specials, key=lambda k: WEAPON_VALUE.get(k, 0))
+        return WEAPON_VALUE.get(kind, 0) > WEAPON_VALUE.get(worst, 0) + 0.25
 
     def _take(self, obs):
         x, y, z = self.pos
@@ -1185,10 +1195,11 @@ class Bot:
                 continue
             out = {"take": p["id"]}
             if me["weapons"][0] is not None and me["weapons"][1] is not None:
-                k, i = min(((k, i) for k, (i, w) in wk.items()), key=lambda s: WEAPON_VALUE.get(s[0], 0))
-                lz = wk.get("laser")
-                if lz and (lz[1].get("charge") or 0) > 0:
-                    continue  # cannot swap while the laser is charging
+                specials = [(k, i) for k, (i, w) in wk.items() if k != "gun"]
+                k, i = min(specials, key=lambda s: WEAPON_VALUE.get(s[0], 0))
+                w = me["weapons"][i]
+                if w.get("kind") == "laser" and (w.get("charge") or 0) > 0:
+                    continue
                 out["drop"] = i
             return out
         return None
