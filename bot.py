@@ -1,4 +1,4 @@
-"""Survivor: a bot that plays for placement.
+"""Survivor: a bot that plays to stay alive.
 
 Priorities, in order: stay in the zone, never show its back, fight with lead-aimed fire while strafing,
 break line of sight and regenerate when losing, and farm cubes/weapons/drops when nobody is around.
@@ -431,7 +431,7 @@ class Bot:
             score -= 1.1 if enemy["aggressor"] else 0.0
             score -= 0.25 if enemy["rear_angle"] > math.radians(self.mech["front_arc_deg"]) / 2 else 0.0
             if enemy["clear"] and self._enemy_health(enemy) <= 0.30:
-                score -= 1.2  # finish it: a kill is a placement and drops its cubes
+                score -= 1.2  # finish it: a kill drops its cubes
             if enemy["id"] == self.focus_id and self.t - self.focus_t < 1.0:
                 score -= 0.8  # focus fire: damage spread over several mechs just regenerates
             if score < best_score:
