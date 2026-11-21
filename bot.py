@@ -18,11 +18,12 @@ except Exception:  # numpy missing: run without a map
 TAU = 2 * math.pi
 DEBUG = bool(__import__('os').environ.get('BOTDEBUG'))
 
-WEAPON_VALUE = {"lightning": 3.0, "laser": 3.0, "gun": 1.0, "mortar": -1.0}
+WEAPON_VALUE = {"lightning": 3.0, "laser": 2.7, "mortar": 1.6, "gun": 0.0}
 UPGRADE_ORDER = [
-    "plating", "armor", "nanites", "laser_damage", "lightning_efficiency", "laser_charge", "gun_rate",
-    "gun_damage", "capacitor", "reactor", "gyros", "lightning_range", "gun_mag", "sensors", "gun_velocity",
-    "servos", "jets", "lightning_chain", "laser_pierce", "mortar_reload", "mortar_velocity", "mortar_splash",
+    "plating", "armor", "nanites", "gun_damage", "gun_rate", "lightning_efficiency", "laser_charge",
+    "laser_damage", "servos", "gyros", "gun_mag", "lightning_range", "sensors", "gun_velocity",
+    "lightning_chain", "mortar_reload", "reactor", "capacitor", "jets", "mortar_velocity", "mortar_splash",
+    "laser_pierce",
 ]
 
 
@@ -80,14 +81,6 @@ class Bot:
         self.heavy_used = False
         self.last_heavy_t = -99.0
         self.focus_id, self.focus_t = None, -99.0
-        self.crate_prog = {}       # crate id -> [hp, best distance, last progress time, last seen time]
-        self.dmg_log = []          # (t, amount) of weapon damage taken, last 2.5 s
-        self.hit_info = None       # (t, bearing, attacker id) of the last weapon hit taken
-        self.retreating = False    # latched below 38% HP, released at 80% (or 60% after 12 s untouched)
-        self.cover_hidden = False
-        self.known_crates = {}     # id -> (pos, t_seen): crates seen earlier, to farm later
-        self.loot_boost = False
-        self.crate_bad = {}        # crate id -> ignore until
         gc.collect()
         gc.freeze()
 
@@ -125,32 +118,9 @@ class Bot:
 
         zone_goal, zone_urgent = self._zone_goal(obs)
         self._measure_threats(enemies)
-
-        # ---------------- situation: incoming damage, unseen attackers, threats in view
-        self.dmg_log = [d for d in self.dmg_log if t - d[0] < 2.5]
-        dps_in = sum(a for _, a in self.dmg_log) / 2.5
-        seen_ids = {e["id"] for e in enemies}
-        hi = self.hit_info
-        hidden = hi is not None and t - hi[0] < 1.5 and hi[1] is not None and hi[2] not in seen_ids
-        threats = [e for e in enemies if e["d"] < 240]
-        n_thr = len(threats) + (1 if hidden else 0)
-        wk = self._weapons()
         target = self._choose_target(enemies)
         self.target_los = target is not None and target["clear"]
-        shootable = target is not None and target["clear"] and target["d"] < self._reach(wk)
-        tgt_hpf = self._enemy_health(target) if target is not None else 1.0
-        finishing = shootable and tgt_hpf <= 0.30 and target["d"] < 130 and self.hp_frac > 0.30 and n_thr <= 2
-        close_fight = finishing or (shootable and target["d"] < 40 and ("lightning" in wk or self.hp_frac > 0.5))
-        if self.hp_frac < 0.38 and n_thr > 0:
-            self.retreating = True
-        elif self.retreating and (self.hp_frac > 0.80 or (t - self.last_dmg_t > 12.0 and self.hp_frac > 0.60)):
-            self.retreating = False
-        many = n_thr >= 3 or (n_thr >= 2 and self.hp_frac < 0.6) or dps_in > 110 or hidden
-        outranged = "laser" not in wk and any("laser" in (e.get("weapons") or []) and e["d"] > 70 and e["clear"]
-                                              for e in threats)
-        fight = shootable
-        zc_now, zr_now = self._zone_circle_at(obs["zone"], t)
-        zone_out = (not me["in_zone"]) or math.dist((x, y), zc_now) > zr_now - 8.0
+        fight = target is not None and self._should_fight(target, obs)
 
         move = (0.0, 0.0)
         boost = False
@@ -158,39 +128,34 @@ class Bot:
         aim_point = None   # world point to aim at (non-combat)
 
         # ---------------- movement decision
+        retreat = target is not None and self._should_retreat(target, enemies)
         final_move = self._final_approach(obs["zone"], fight)
         if final_move is not None:
             move = final_move
             label = "final center"
-        elif zone_out:
-            move = self._navigate(zone_goal)
-            boost = True
-            label = "zone"
-        elif (self.retreating or many or outranged) and not close_fight:
-            move, label = self._cover_move(threats, obs, hi if hidden else None)
-            boost = me["energy"] > 30 and t - self.last_dmg_t < 2.0
         elif zone_urgent:
             move = self._navigate(zone_goal)
-            boost = self._outside_soon(obs)
+            boost = not me["in_zone"] or self._outside_soon(obs)
             label = "zone"
         elif (supply := self._supply_move(obs, enemies)) is not None:
             move, label = supply
+        elif retreat and not (target["d"] < 38 or t - self.last_dmg_t < 0.6 and self.target_los):
+            move, label = self._retreat(enemies, zone_goal, obs)
+            boost = me["energy"] > 30 and t - self.last_dmg_t < 1.5
+        elif fight and self._outnumbered(enemies):
+            move, label = self._retreat(enemies, zone_goal, obs, fight_target=target)
+            boost = me["energy"] > 45 and t - self.last_dmg_t < 1.0
         elif fight:
-            move = self._fight_move(target, enemies, zone_goal, obs, finishing)
+            move = self._fight_move(target, enemies, zone_goal, obs)
             boost = me["energy"] > 45 and t - self.last_dmg_t < 1.0
             label = f"fight {target['id']}"
+        else:
+            move, aim_point, label = self._peaceful(obs, npcs, zone_goal)
+
+        if label.startswith("fight "):
             loot = self._combat_loot(obs, enemies)
             if loot is not None:
                 move, label = loot
-        else:
-            move, aim_point, label = self._peaceful(obs, npcs, zone_goal)
-            # loot runs: boost to far loot while no mech is close
-            far = label in ("cube", "weapon", "crate", "drop", "farm crate") and math.hypot(*move) > 0.5
-            safe = not any(e["d"] < 80 for e in enemies)
-            if far and safe and (me["energy"] > 60 or (self.loot_boost and me["energy"] > 22)):
-                self.loot_boost = boost = True
-            else:
-                self.loot_boost = False
 
         if final_move is None:
             if self.escape is not None and t < self.escape_until:
@@ -198,14 +163,12 @@ class Bot:
             move = self._dodge(obs, move)
             move = self._keep_in_zone(obs, move)
 
-        # ---------------- aim + fire: keep shooting the target while repositioning or retreating
+        # ---------------- aim + fire
         fire = [False, False]
         aim = None
-        if hidden and not (shootable and target["d"] < 45) and not self._laser_charging():
-            aim = (hi[1], 0.0)  # face the unseen attacker: front armour, and we may see it next tick
-        elif target is not None and (fight or label in ("hide", "to cover", "kite")):
+        if fight or (target is not None and label in ("cover", "to cover", "kite")):
             aim = self._lead_aim(target)
-            if shootable:
+            if fight:
                 fire = self._fire_control(target, aim, enemies, obs)
         if aim is None and aim_point is not None:
             aim = self._aim_at_point(aim_point)
@@ -258,8 +221,6 @@ class Bot:
                     self.last_dmg_t = t
                     if ev.get("by") is not None:
                         self.attackers[ev["by"]] = t
-                    self.dmg_log.append((t, ev.get("amount", 0.0)))
-                    self.hit_info = (t, ev.get("bearing"), ev.get("by"))
                     if ev.get("bearing") is not None:
                         self.threats.append((ev["bearing"], t, 3.0 if ev.get("rear") else 2.0))
             elif et == "hit":
@@ -268,8 +229,6 @@ class Bot:
                 self.bad_pickups[ev.get("id")] = t
             elif et == "took":
                 self.bad_pickups.pop(ev.get("id"), None)
-        for c in obs.get("crates") or []:
-            self.known_crates[c["id"]] = (c["pos"], t)
         for s in obs.get("sounds") or []:
             k = s.get("kind")
             if k in ("gun", "laser", "laser_charge", "lightning", "mortar", "step", "boost", "jet", "reload"):
@@ -422,109 +381,21 @@ class Bot:
             enemy["rear_angle"] = facing_error
 
     def _choose_target(self, enemies):
-        """Lowest score wins: near and weak first, a clear shot above all, finish hurt mechs, stay on the current
-        target (damage spread over several hunters just regenerates), answer whoever is shooting us."""
         best, best_score = None, math.inf
-        t = self.t
         for enemy in enemies:
-            if enemy["d"] > 285:
+            if enemy["d"] > self.W["laser"]["range"]:
                 continue
-            score = enemy["d"] + 0.2 * enemy.get("hp", self.mech["hp"])
-            if self._enemy_health(enemy) <= 0.30:
-                score -= 100.0
-            if not enemy["clear"]:
-                score += 400.0
-            if enemy["id"] == self.focus_id and t - self.focus_t < 1.0:
-                score -= 120.0
-            if t - self.attackers.get(enemy["id"], -99) < 4.0:
-                score -= 40.0
+            score = enemy["d"] / 90 + 1.6 * self._enemy_health(enemy)
+            score += 0.7 if not enemy["clear"] else 0.0
+            score -= 1.1 if enemy["aggressor"] else 0.0
+            score -= 0.25 if enemy["rear_angle"] > math.radians(self.mech["front_arc_deg"]) / 2 else 0.0
+            if enemy["id"] == self.focus_id and self.t - self.focus_t < 1.0:
+                score -= 0.8  # focus fire
             if score < best_score:
                 best, best_score = enemy, score
         if best is not None:
-            self.focus_id, self.focus_t = best["id"], t
+            self.focus_id, self.focus_t = best["id"], self.t
         return best
-
-    def _reach(self, wk):
-        r = 0.0
-        for k, (i, w) in wk.items():
-            if k == "gun":
-                r = max(r, w["stats"]["range"] * 0.95)
-            elif k == "laser":
-                r = max(r, w["stats"]["range"] * 0.95)
-            elif k == "lightning":
-                r = max(r, w["stats"]["range"] * 0.95)
-        return r
-
-    def _laser_charging(self):
-        lz = self._weapons().get("laser")
-        return bool(lz and (lz[1].get("charge") or 0) > 0)
-
-    def _cover_move(self, threats, obs, hidden_hit):
-        """Get out of sight of the nearest threats (and of an unseen attacker's bearing), preferring spots away from
-        them; hold still once fully hidden so regeneration runs."""
-        x, y, z = self.pos
-        t = self.t
-        pts = [e["pos"] for e in sorted(threats, key=lambda e: e["d"])[:3]]
-        if hidden_hit is not None:
-            b = hidden_hit[1]
-            pts.append((x + math.cos(b) * 120.0, y + math.sin(b) * 120.0, z))
-        if self.nav is None or not pts:
-            return (0.0, 0.0), "hide"
-        keep = (self.cover is not None and self.cover_hidden and t - self.cover_t < 2.0 and t - self.last_dmg_t > 0.5)
-        if not keep and t - self.cover_t > 0.4 and self._heavy_ok():
-            self.heavy_used = True
-            self.cover, self.cover_hidden = self._cover_search(pts, obs)
-            self.cover_t = t
-        if self.cover is None:
-            sx = sum(p[0] for p in pts) / len(pts)
-            sy = sum(p[1] for p in pts) / len(pts)
-            ax, ay = norm2(x - sx, y - sy)
-            return self._steer_free(ax, ay), "kite"
-        cx, cy = self.cover
-        if math.hypot(cx - x, cy - y) < 2.5:
-            return (0.0, 0.0), "hide"
-        return self._navigate((cx, cy)), "to cover"
-
-    def _cover_search(self, pts, obs):
-        import numpy as np
-        n = self.nav
-        x, y, z = self.pos
-        mx = sum(p[0] for p in pts) / len(pts)
-        my = sum(p[1] for p in pts) / len(pts)
-        away = math.atan2(y - my, x - mx)
-        rings = (7.0, 14.0, 22.0, 32.0, 44.0, 58.0, 75.0)
-        cands = [(x, y, 0.0, away)]
-        for k in range(16):
-            a = k * TAU / 16
-            ca, sa = math.cos(a), math.sin(a)
-            r = 3.5
-            ri = 0
-            while ri < len(rings) and r <= rings[-1]:
-                px, py = x + ca * r, y + sa * r
-                if not n.is_free(px, py):
-                    break
-                if r >= rings[ri]:
-                    cands.append((px, py, r, a))
-                    ri += 1
-                r += 3.5
-        eye = self.mech["eye_height"]
-        A, B = [], []
-        for (px, py, r, a) in cands:
-            gz = n.ground_at(px, py) if r > 0 else z
-            for p in pts:
-                A.append((p[0], p[1], p[2] + eye))
-                B.append((px, py, gz + eye * 0.9))
-        vis = n.los_many(np.array(A, np.float32), np.array(B, np.float32), step=2.0)
-        k = len(pts)
-        best, bs, bhid = None, 1e18, False
-        for ci, (px, py, r, a) in enumerate(cands):
-            seen = int(sum(bool(v) for v in vis[ci * k:(ci + 1) * k]))
-            s = 100.0 * seen + 0.8 * r - 12.0 * math.cos(a - away)
-            if not self._in_zone_later(obs, (px, py), 8.0, 5.0):
-                s += 300.0
-            if s < bs:
-                best, bs, bhid = (px, py), s, seen == 0
-        return best, bhid
 
     def _should_fight(self, target, obs):
         if target["aggressor"]:
@@ -844,33 +715,33 @@ class Bot:
                 return math.cos(a) * mag, math.sin(a) * mag
         return mx, my
 
-    def _fight_move(self, tgt, enemies, zone_goal, obs, finishing=False):
+    def _fight_move(self, tgt, enemies, zone_goal, obs):
         x, y = self.pos[0], self.pos[1]
         t = self.t
         wk = self._weapons()
         ex, ey = tgt["pos"][0], tgt["pos"][1]
         d = tgt["d"]
-        have_l = "lightning" in wk and self.me["energy"] > 15
-        have_z = "laser" in wk
-        if finishing:
-            want = 28.0 if have_l else 55.0
-        elif have_l and have_z:
-            want = 28.0 if d < 60 else 110.0
-        elif have_z:
+        their = tgt.get("weapons") or []
+        if "lightning" in wk and self.me["energy"] > 25:
+            want = 26.0
+        elif "lightning" in their:
+            want = 75.0
+        elif "laser" in wk and "gun" not in wk:
             want = 110.0
-        elif have_l:
-            want = 28.0
         else:
-            want = 85.0
+            want = 60.0
+        hpf_t = self._enemy_health(tgt)
+        if hpf_t < 0.25 and self.hp_frac > 0.4:
+            want *= 0.7
         ux, uy = norm2(ex - x, ey - y)
-        radial = max(-1.0, min(1.0, (d - want) / 30.0))
+        radial = max(-1.0, min(1.0, (d - want) / max(15.0, want * 0.5)))
         if t > self.strafe_until:
-            if self.rng.random() < 0.7:
+            if self.rng.random() < 0.55:
                 self.strafe = -self.strafe
-            self.strafe_until = t + 1.0 + self.rng.random() * 1.6
+            self.strafe_until = t + 0.45 + self.rng.random() * 0.9
         lx, ly = -uy * self.strafe, ux * self.strafe
-        mx = ux * radial + lx * 0.85
-        my = uy * radial + ly * 0.85
+        mx = ux * radial * 0.8 + lx
+        my = uy * radial * 0.8 + ly
         # stay near the safe circle while fighting
         if not self._in_zone_later(obs, (x + mx * 10, y + my * 10), 6.0, 12.0):
             gx, gy = norm2(zone_goal[0] - x, zone_goal[1] - y)
@@ -984,27 +855,6 @@ class Bot:
                 ax, ay = norm2(x - lx, y - ly) if dd > 0.5 else (math.cos(self.t), math.sin(self.t))
                 mx += ax * 2.0
                 my += ay * 2.0
-        for p in obs.get("projectiles") or []:
-            if p["kind"] not in ("gun", "npc"):
-                continue
-            px, py, pz = p["pos"]
-            vx, vy, vz = p["vel"]
-            vv = vx * vx + vy * vy + vz * vz
-            if vv < 1.0:
-                continue
-            cz = z + 4.5
-            tc = ((x - px) * vx + (y - py) * vy + (cz - pz) * vz) / vv
-            if not 0.02 <= tc <= 0.45:
-                continue
-            ox, oy, oz = px + vx * tc - x, py + vy * tc - y, pz + vz * tc - cz
-            if ox * ox + oy * oy + oz * oz > 3.8 * 3.8:
-                continue
-            nx_, ny_ = norm2(-vy, vx)  # across the bullet's path
-            side = -1.0 if nx_ * ox + ny_ * oy > 0 else 1.0
-            if abs(nx_ * ox + ny_ * oy) < 0.3:
-                side = float(self.strafe)
-            mx += nx_ * side
-            my += ny_ * side
         for e in obs["mechs"]:
             if e.get("charging") and e["kind"] == "mech":
                 ex, ey = e["pos"][0], e["pos"][1]
@@ -1187,49 +1037,19 @@ class Bot:
                     self.want_jump = True
             return mv, None, "weapon"
 
-        # crates: shoot from range. Cubes are the only big source of effective HP (+4% HP and damage each,
-        # plus upgrade offers), so the opening farms crates much farther out while the hunters are few.
-        crate_r = 150.0
+        # crates: shoot from range
         best = None
         for c in obs.get("crates") or []:
             cp = c["pos"]
             dd = math.dist((x, y), cp[:2])
-            if dd < crate_r and ok(cp[:2]) and self.crate_bad.get(c["id"], -1) < t and (best is None or dd < best[0]):
-                best = (dd, c)
+            if dd < 70 and ok(cp[:2]) and (best is None or dd < best[0]):
+                best = (dd, cp)
         if best:
-            dd, c = best
-            cp = c["pos"]
+            dd, cp = best
             self.farm_kind = "crate"
             p = (cp[0], cp[1], cp[2] + self.cfg["crates"]["height"] / 2)
-            see = self.nav is None or self.nav.los((x, y, z + self.muzzle), p)
-            # watchdog: give up on a crate that neither loses HP nor gets closer for 6 s
-            prog = self.crate_prog.get(c["id"])
-            if prog is None or t - prog[3] > 1.0:
-                prog = [c.get("hp", 0), dd, t, t]
-            elif c.get("hp", 0) < prog[0] - 1 or dd < prog[1] - 2:
-                prog = [c.get("hp", 0), min(dd, prog[1]), t, t]
-            else:
-                prog[3] = t
-                if t - prog[2] > 6.0:
-                    self.crate_bad[c["id"]] = t + 45.0
-            self.crate_prog[c["id"]] = prog
-            mv = (0.0, 0.0) if dd < 30 and see else self._navigate(cp[:2])
+            mv = (0.0, 0.0) if dd < 35 else self._navigate(cp[:2])
             return mv, p, "crate"
-
-        # crates seen earlier, while healthy and alone
-        if self.hp_frac > 0.6 and not any(e["kind"] == "mech" for e in obs.get("mechs") or []):
-            best = None
-            for cid, (cp, ts) in list(self.known_crates.items()):
-                if self.crate_bad.get(cid, -1) >= t or t - ts < 0.01:
-                    continue
-                dd = math.dist((x, y), cp[:2])
-                if dd < 30 and (self.nav is None or self.nav.los((x, y, z + self.muzzle), (cp[0], cp[1], cp[2] + 1.2))):
-                    self.known_crates.pop(cid, None)  # we would see it from here: it is gone
-                    continue
-                if dd < 260 and ok(cp[:2]) and (best is None or dd < best[0]):
-                    best = (dd, cp)
-            if best:
-                return self._navigate(best[1][:2]), None, "farm crate"
 
         # NPC drones: two cubes each, shoot from outside their aggro range
         if self.hp_frac > 0.6 and me["cubes"] < self.cfg["cubes"]["stat_cap"] and "gun" in wk:
@@ -1303,13 +1123,16 @@ class Bot:
         return self.nav.ground_at(p[0], p[1])
 
     def _want_weapon(self, kind, wk):
-        """Laser and lightning are wanted; a mortar never (a laser hit on its carrier does +60%). With both
-        slots full, the gun or a mortar makes room for the missing special."""
-        if kind in wk or kind in ("gun", "mortar"):
+        if kind in wk or kind == "gun" or kind == "mortar":
             return False
         if self.me["weapons"][1] is None or self.me["weapons"][0] is None:
             return True
-        return "gun" in wk or "mortar" in wk
+        # both full: swap the worse special for a better one
+        specials = [k for k in wk if k != "gun"]
+        if not specials:
+            return False
+        worst = min(specials, key=lambda k: WEAPON_VALUE.get(k, 0))
+        return WEAPON_VALUE.get(kind, 0) > WEAPON_VALUE.get(worst, 0) + 0.25
 
     def _take(self, obs):
         x, y, z = self.pos
@@ -1323,8 +1146,10 @@ class Bot:
                 continue
             out = {"take": p["id"]}
             if me["weapons"][0] is not None and me["weapons"][1] is not None:
-                k, i = min(((k, i) for k, (i, w) in wk.items()), key=lambda s: WEAPON_VALUE.get(s[0], 0))
-                if self._laser_charging():
+                specials = [(k, i) for k, (i, w) in wk.items() if k != "gun"]
+                k, i = min(specials, key=lambda s: WEAPON_VALUE.get(s[0], 0))
+                w = me["weapons"][i]
+                if w.get("kind") == "laser" and (w.get("charge") or 0) > 0:
                     continue
                 out["drop"] = i
             return out

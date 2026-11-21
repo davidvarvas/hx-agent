@@ -4,6 +4,14 @@
 **Practice** = the real practice server (48 matches), which is ground truth.
 "Seeds 200–295" means two 48-match batches: `SEED0=200` and `SEED0=248`.
 
+## Real scorer only from here
+- **L1 (`9b5aa78`): practice 3.58.** The sim had said 5.31 vs 3.77. My sims have now mis-ranked my tactics twice, and other teams report the same, so changes are judged only by real practice scores from now on: one change set per submission on the best real bot.
+- **A1:** `89ec1cd` plus never-mortar, plating → armor → nanites, and focus fire (stay on the current target).
+- **A2:** `89ec1cd` plus three changes, modelled on the 4.75 team's largest real gain (3.71 → 4.44):
+  - finish off clear targets under 30% HP, overriding retreat and outnumbered
+  - grab cubes within 70 m before fighting
+  - dodge gun rounds about to hit
+
 ## v7 (L1): new decision core on the GPT bot
 - **Base:** `davidvarvas/mech-royale-bot-gpt` `89ec1cd` (4.08 real), the team's best scored bot. Its aiming, supply-drop, combat-loot and final-centre code are kept.
 - **Sources:** my own implementation of design principles learned by reading public entries; no code was copied:
