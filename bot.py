@@ -324,8 +324,14 @@ class Search:
 # ----------------------------------------------------------------------------------------------
 # Bot
 # ----------------------------------------------------------------------------------------------
+# Switches turned on once a free-for-all is detected (the qualifying round and the final). The original author's
+# 16-bot free-for-all simulations measured sneak +0.2 to +0.65 and patient +0.36 there, while both cost points
+# in practice, where they stay off.
+FFA_FLAGS = {"sneak", "patient"}
+
+
 class Bot:
-    name = "mech-royale"
+    name = "404-not-found"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -377,6 +383,9 @@ class Bot:
         self.noprog = 0
         self.boosting = False
         self.flags = set(FLAGS)  # strategy switches (tools/arena.py sets them per instance)
+        self.my_kills = 0
+        self.ffa = False  # set once mechs die that we did not kill: practice house bots never kill each other
+        self.n_mechs = cfg["match"].get("mechs", 16)
         self.hide_until = 0.0
         self.known_crates = {}   # id -> pos (seen, maybe out of sight now)
         self.known_picks = {}    # id -> (kind, pos)
@@ -685,10 +694,18 @@ class Bot:
                 self.dmg_log.append((t, e.get("amount", 0), e["by"], e.get("bearing"), bool(e.get("rear"))))
             elif e["type"] == "kill":
                 self.last_kill_t = t
+                self.my_kills += 1
             elif e["type"] in ("took", "take_failed"):
                 self.known_picks.pop(e.get("id"), None)
         self.dmg_log = [d for d in self.dmg_log if t - d[0] < 2.5]
         dps_in = sum(d[1] for d in self.dmg_log) / 2.5
+        # free-for-all or practice? Deaths we did not cause (early, before the zone kills) mean a free-for-all
+        if not self.ffa:
+            others_dead = self.n_mechs - obs.get("alive", self.n_mechs) - self.my_kills
+            if others_dead >= (1 if t < 150 else 3):
+                self.ffa = True
+                self.flags |= FFA_FLAGS
+                log("free-for-all detected at t=%.1f (%d deaths we did not cause)" % (t, others_dead))
         for s in obs["sounds"]:
             if s["kind"] in SOUND_THREAT and s["dist"] != "far":
                 self.last_sound = (t, s["bearing"])

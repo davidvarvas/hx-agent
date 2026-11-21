@@ -4,6 +4,15 @@
 **Practice** = the real practice server (48 matches), which is ground truth.
 "Seeds 200–295" means two 48-match batches: `SEED0=200` and `SEED0=248`.
 
+## B1: free-for-all switches (our change on B0)
+- **Detection:** the bot spots a free-for-all from mechs dying that it didn't kill (`mechs − alive − own kills`; one death before 150 s, three after). Practice house bots never kill each other.
+- **What switches on:** in a free-for-all, the original author's `sneak` and `patient` switches. His 16-bot free-for-all league measured sneak +0.2 to +0.65 and patient +0.36 ± 0.22. Both cost points in practice, so they stay off there.
+- **Bot name:** "404-not-found".
+- **Sim check:**
+  - Practice: detection never fires, and play is identical to B0 in 20 of 24 matches (the rest differ from timing guards).
+  - Free-for-all: it fires at 12.8 s.
+- **Expected practice:** the same as B0.
+
 ## B0: build on the top public entry (attributed)
 - **Base:** `bot.py` is now [mech-royale by LanceHuang245](https://github.com/LanceHuang245/mech-royale) at commit `171bc06` (MIT License, Copyright (c) 2026 LanceHuang245).
   - The full license notice is in `third_party/LanceHuang245-mech-royale-LICENSE`, and a credit header is at the top of `bot.py`.
