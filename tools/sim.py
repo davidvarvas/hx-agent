@@ -3,8 +3,11 @@
 Runs one bot process (mechfight/1 over stdin/stdout, lockstep) against 15 in-process house bots that
 play as a squad and hunt it (1 hunter at start, +1 per kill, all of them after 4:00), like practice.
 Models: walking/boost/jump/jet with wall sliding on the 2 m grid, aim slew, gun bullets, lightning,
-laser, crates, cubes, weapon pickups, the zone, regen, rear armor, vision with memory, gun sounds.
-No mortar, no NPC drones, no supply drops, no upgrades effects (offers are sent and accepted).
+laser, crates, cubes, weapon pickups, the zone, regen, rear armor, vision with memory, gun sounds, and the
+bot's upgrade offers with their real effects from hello.config (house bots get none).
+Supply drops are modelled (house bots ignore them). No mortar, no NPC drones. DEFEND (below) sets how
+non-hunting house bots react;
+DEFEND=1 matched the kit example bot's real practice score (sim 1.06 vs 1.15 real).
 
     python3 tools/sim.py --seed 3 -- python3 -u bot.py
 """
@@ -13,6 +16,7 @@ import json
 import math
 import os
 import random
+import re
 import subprocess
 import sys
 import threading
@@ -24,6 +28,10 @@ sys.path.insert(0, os.path.dirname(HERE))
 import nav  # noqa: E402
 
 NOISE = float(os.environ.get("NOISE", "1"))
+# What house bots that are not (yet) hunting do when the bot is around:
+# 0 = ignore it completely (original sim), 1 = shoot back for 8 s after the bot damages them,
+# 2 = also shoot whenever they can see it (they still only chase when hunting).
+DEFEND = int(os.environ.get("DEFEND", "1"))
 KIT = os.environ.get("MF_KIT", os.path.join(os.path.dirname(os.path.dirname(HERE)), "mechfight-kit"))
 TAU = 2 * math.pi
 
@@ -77,7 +85,11 @@ class Mech:
         self.cubes = 0
         self.alive = True
         self.last_combat = -99
-        self.weapons = [{"kind": "gun", "cooldown": 0.0, "ammo": 12, "reload": 0.0, "stats": dict(cfg["weapons"]["gun"])}, None]
+        self.mc = dict(m)  # this mech's [mech] numbers; upgrades change them
+        self.wstats = {k: dict(v) for k, v in cfg["weapons"].items()}  # its weapon numbers per kind (upgrades stick)
+        self.upg = {}
+        self.offers_given = 0
+        self.weapons = [{"kind": "gun", "cooldown": 0.0, "ammo": 12, "reload": 0.0, "stats": self.wstats["gun"]}, None]
         self.events = []
         self.seen = {}
         self.kills = 0
@@ -89,6 +101,7 @@ class Mech:
 class Sim:
     def __init__(self, seed, cmd, verbose=False, skill=None):
         self.rng = random.Random(seed)
+        self.urng = random.Random(seed * 7919 + 17)  # upgrade offers: separate stream, same world per seed
         hello = json.loads(__import__("gzip").open(os.path.join(KIT, "check/stream.jsonl.gz"), "rt").readline())
         self.cfg = hello["config"]
         self.nav = nav.NavMap(os.path.join(KIT, "arena"))
@@ -132,6 +145,9 @@ class Sim:
         self.sounds = {i: [] for i in range(16)}
         self.beams = []
         self.zone_phase = 0
+        self.drops = []          # supply drops: called at drops.times, land fall_s later inside the next circle
+        self.drops_called = 0
+        self.drng = random.Random(seed * 104729 + 3)  # separate stream: same world per seed
         self._zone_setup()
         self.deaths = []  # (t, id)
         self.st = {"shots": 0, "hits": 0, "dealt": 0.0, "taken": 0.0, "zone": 0.0}  # the bot's own match stats
@@ -147,6 +163,7 @@ class Sim:
         assert json.loads(r)["type"] == "ready"
         self.times = []
         self.late = 0
+        self.bot_ms = 0
         self.last_action = {}
 
     def _nid(self, base):
@@ -205,6 +222,48 @@ class Sim:
         c = [self.zcenter[k] + (self.znext[k] - self.zcenter[k]) * f for k in range(2)]
         return c, self.zradius + (self.znr - self.zradius) * f
 
+    def _drops_tick(self):
+        dc = self.cfg.get("drops")
+        if not dc:
+            return
+        times = dc.get("times", [])
+        if self.drops_called < len(times) and self.t >= times[self.drops_called]:
+            self.drops_called += 1
+            c = self.znext or self.zcenter
+            r = (self.znr if self.znext else self.zradius) * dc.get("spread", 0.7)
+            for _ in range(200):  # open ground inside the circle the zone is closing to
+                a, rr = self.drng.random() * TAU, math.sqrt(self.drng.random()) * r
+                x, y = c[0] + math.cos(a) * rr, c[1] + math.sin(a) * rr
+                if self.nav.is_free(x, y):
+                    break
+            self.drops.append({"id": 20000 + self.drops_called, "pos": [x, y, self.nav.ground_at(x, y)], "radius": dc["radius"],
+                               "land_t": self.t + dc["fall_s"], "capture_s": dc["capture_s"], "progress": 0.0, "holder": None})
+        for d in list(self.drops):
+            if self.t < d["land_t"]:
+                continue
+            inside = [m for m in self.mechs if m.alive and math.hypot(m.pos[0] - d["pos"][0], m.pos[1] - d["pos"][1]) < d["radius"]
+                      and abs(m.pos[2] - d["pos"][2]) < 6]
+            if not inside:
+                d["holder"], d["progress"] = None, 0.0
+            elif len(inside) == 1:
+                m = inside[0]
+                if d["holder"] != m.id:
+                    d["holder"], d["progress"] = m.id, 0.0  # a different sole occupant: the clock restarts
+                d["progress"] += self.dt
+                if d["progress"] >= d["capture_s"]:
+                    self.drops.remove(d)
+                    for _ in range(dc.get("cubes", 3)):
+                        m.cubes += 1
+                        if m.cubes <= self.cfg["cubes"]["stat_cap"]:
+                            m.max_hp *= 1 + 0.04 / (1 + 0.04 * (m.cubes - 1))
+                    if dc.get("repair", 1):
+                        m.hp = m.max_hp
+                    m.energy = m.mc["energy"]
+                    m.events.append({"type": "drop", "id": d["id"], "cubes": m.cubes})
+                    if m.id == self.me_id:
+                        self.st["drops"] = self.st.get("drops", 0) + 1
+            # two or more in the ring: the clock freezes
+
     def _zone_tick(self):
         if self.znext is not None and self.t >= self.se:
             self.zcenter, self.zradius = self.znext, self.znr
@@ -251,11 +310,12 @@ class Sim:
         z = {"center": zc, "radius": zr,
              "next_center": self.znext if self.znext else zc, "next_radius": self.znr if self.znext else 0,
              "shrink_start": self.ss, "shrink_end": self.se, "dps": self.zdps}
-        st = dict(self.cfg["mech"])
+        st = dict(m.mc)
         st["hp"] = m.max_hp
         o = {"type": "obs", "tick": self.tick, "t": round(self.t, 2), "alive": sum(1 for q in self.mechs if q.alive),
              "self": {"id": m.id, "pos": m.pos[:], "vel": m.vel[:], "aim": m.aim[:], "hp": m.hp, "max_hp": m.max_hp,
-                      "energy": m.energy, "max_energy": 100, "grounded": m.grounded, "cubes": m.cubes, "upgrades": [],
+                      "energy": m.energy, "max_energy": m.mc["energy"], "grounded": m.grounded, "cubes": m.cubes,
+                      "upgrades": [k for k, n in m.upg.items() for _ in range(n)],
                       "in_zone": math.dist(m.pos[:2], zc) <= zr,
                       "weapons": [dict(w) if w else None for w in m.weapons], "stats": st},
              "mechs": mechs,
@@ -265,12 +325,14 @@ class Sim:
              "cubes": [c for c in self.cubes if self.visible_pt(m, c["pos"])],
              "pickups": [p for p in self.pickups if self.visible_pt(m, p["pos"])],
              "sounds": self.sounds[m.id], "beams": [], "events": m.events, "zone": z,
-             "offer": m.offer, "drops": []}
+             "offer": m.offer,
+             "drops": [{"id": d["id"], "pos": d["pos"], "radius": d["radius"], "lands_in": round(max(0.0, d["land_t"] - self.t), 2),
+                        "capture_s": d["capture_s"], "progress": round(d["progress"], 2), "holder": d["holder"]} for d in self.drops]}
         return o
 
     # ------------------------------------------------------------------ actions
     def apply(self, m, a):
-        mc = self.cfg["mech"]
+        mc = m.mc
         mv = a.get("move", [0, 0])
         l = math.hypot(*mv)
         if l > 1:
@@ -294,8 +356,10 @@ class Sim:
             if g and g["kind"] == "gun" and g["reload"] == 0 and g["ammo"] < g["stats"]["mag"]:
                 g["reload"] = g["stats"]["reload"]
         if "pick" in a and m.offer:
+            ch = m.offer["choices"]
+            i = a["pick"] if isinstance(a["pick"], int) and 0 <= a["pick"] < len(ch) else 0
             m.offer = None
-            m.events.append({"type": "upgrade", "id": "x"})
+            self._apply_upgrade(m, ch[i]["id"])
         if "take" in a:
             self._take(m, a["take"], a.get("drop"))
 
@@ -313,7 +377,7 @@ class Sim:
         old = m.weapons[slot]
         self.pickups.remove(p)
         k = p["kind"]
-        w = {"kind": k, "cooldown": 1.0, "stats": dict(self.cfg["weapons"][k])}
+        w = {"kind": k, "cooldown": max(self.cfg["loot"].get("equip_s", 1.0), m.wstats[k]["cooldown"]), "stats": m.wstats[k]}
         if k == "laser":
             w["charge"] = 0
         m.weapons[slot] = w
@@ -338,7 +402,7 @@ class Sim:
         return g, False
 
     def move(self, m):
-        mc = self.cfg["mech"]
+        mc = m.mc
         dt = self.dt
         acc = mc["ground_accel"] if m.grounded else mc["air_accel"]
         for k in range(2):
@@ -354,7 +418,7 @@ class Sim:
             m.spend_t = self.t
         m.energy = max(0.0, m.energy)
         if self.t - m.spend_t > mc["energy_regen_delay"]:
-            m.energy = min(100.0, m.energy + mc["energy_regen"] * dt)
+            m.energy = min(mc["energy"], m.energy + mc["energy_regen"] * dt)
         m.vel[2] -= mc["gravity"] * dt
         x, y, z = m.pos
         nx, ny = x + m.vel[0] * dt, y + m.vel[1] * dt
@@ -512,8 +576,10 @@ class Sim:
             rear = abs(wrap(b - obj.aim[0])) > math.pi / 2
             if rear:
                 dmg *= 1.5
+            dmg *= max(0.0, 1.0 - obj.mc.get("armor", 0.0))  # armor: weapon damage only (zone damage is applied elsewhere)
             if src is not None and src.id == self.me_id:
                 self.st["dealt"] += dmg
+                obj.hit_by_me = self.t
                 if weapon == "gun":
                     self.st["hits"] += 1
             if obj.id == self.me_id:
@@ -599,11 +665,20 @@ class Sim:
         zc, zr = self.zone_now()
         nc = self.znext or zc
         a = {"move": [0, 0], "fire": [False, False]}
-        if hunting:
+        defend = False
+        if not hunting and me.alive and DEFEND:
+            d = math.dist(me.pos[:2], m.pos[:2])
+            if d < 200 and (self.t - getattr(m, "hit_by_me", -99) < 8 or DEFEND >= 2):
+                defend = self.nav.los((m.pos[0], m.pos[1], m.pos[2] + 8), (me.pos[0], me.pos[1], me.pos[2] + 5))
+        if defend:
+            a = self._zone_walk(m, zc, nc)  # keeps walking with the zone, and shoots back below
+        if hunting or defend:
             d = math.dist(me.pos[:2], m.pos[:2])
             dx, dy = me.pos[0] - m.pos[0], me.pos[1] - m.pos[1]
             ux, uy = dx / max(d, 1e-6), dy / max(d, 1e-6)
-            if d > 55 or not self.nav.los((m.pos[0], m.pos[1], m.pos[2] + 8), (me.pos[0], me.pos[1], me.pos[2] + 5)):
+            if not hunting:
+                pass
+            elif d > 55 or not self.nav.los((m.pos[0], m.pos[1], m.pos[2] + 8), (me.pos[0], me.pos[1], me.pos[2] + 5)):
                 path = getattr(m, "path", None)
                 if path is None or self.t - getattr(m, "path_t", -9) > 2:
                     m.path = self.nav.astar(m.pos[:2], me.pos[:2], max_expand=2500) or []
@@ -631,17 +706,66 @@ class Sim:
                 if d < 200 and self.nav.los((m.pos[0], m.pos[1], m.pos[2] + 7), (me.pos[0], me.pos[1], me.pos[2] + 4.5)):
                     a["fire"] = [abs(wrap(m.aim[0] - m.goal_aim[0])) < 0.08, False]
         else:
-            if math.dist(m.pos[:2], nc) > self.znr * 0.6 if self.znext else math.dist(m.pos[:2], zc) > 5:
-                path = getattr(m, "path", None)
-                if path is None or self.t - getattr(m, "path_t", -9) > 4:
-                    m.path = self.nav.astar(m.pos[:2], nc, max_expand=2500) or []
-                    m.path_t = self.t
-                while m.path and math.dist(m.path[0], m.pos[:2]) < 4:
-                    m.path.pop(0)
-                tgt = m.path[0] if m.path else nc
-                vx, vy = tgt[0] - m.pos[0], tgt[1] - m.pos[1]
-                l = math.hypot(vx, vy) or 1
-                a["move"] = [vx / l * 0.7, vy / l * 0.7]
+            a = self._zone_walk(m, zc, nc)
+        return a
+
+    # ------------------------------------------------------------------ upgrades (the bot's own)
+    def _offers(self, m):
+        """Offer 3 random eligible upgrades each time the cube count passes a threshold; choice 0 on timeout."""
+        if m.offer is not None:
+            if self.t >= m.offer["expires"]:
+                ch = m.offer["choices"]
+                m.offer = None
+                self._apply_upgrade(m, ch[0]["id"])
+            return
+        due = sum(1 for c in self.cfg["cubes"]["upgrade_thresholds"] if m.cubes >= c)
+        if m.offers_given >= due:
+            return
+        held = {w["kind"] for w in m.weapons if w}
+        elig = [u for u in self.cfg.get("upgrades", []) if m.upg.get(u["id"], 0) < u.get("max", 1)
+                and (u.get("requires") is None or u["requires"] in held)]
+        if not elig:
+            return
+        m.offers_given += 1
+        ch = self.urng.sample(elig, min(3, len(elig)))
+        m.offer = {"id": m.offers_given, "expires": round(self.t + self.cfg["bot"]["offer_timeout_s"], 2),
+                   "choices": [{"id": u["id"], "name": u["name"], "desc": u["desc"]} for u in ch]}
+
+    def _apply_upgrade(self, m, uid):
+        u = next((u for u in self.cfg.get("upgrades", []) if u["id"] == uid), None)
+        if u is None:
+            return
+        m.upg[uid] = m.upg.get(uid, 0) + 1
+        for ef in u.get("effects", []):
+            p = ef["path"].split(".")
+            if p[0] == "mech" and len(p) == 2:
+                d, key = m.mc, p[1]
+            elif p[0] == "weapons" and len(p) == 3 and p[1] in m.wstats:
+                d, key = m.wstats[p[1]], p[2]
+            else:
+                continue
+            old = float(d.get(key, 0.0))
+            new = old * ef["mul"] if "mul" in ef else old + ef.get("add", 0.0)
+            d[key] = new
+            if p == ["mech", "hp"] and old > 0:  # plating: more max HP, healing the difference
+                gain = m.max_hp * (new / old - 1.0)
+                m.max_hp += gain
+                m.hp += gain
+        m.events.append({"type": "upgrade", "id": uid})
+
+    def _zone_walk(self, m, zc, nc):
+        a = {"move": [0, 0], "fire": [False, False]}
+        if math.dist(m.pos[:2], nc) > self.znr * 0.6 if self.znext else math.dist(m.pos[:2], zc) > 5:
+            path = getattr(m, "path", None)
+            if path is None or self.t - getattr(m, "path_t", -9) > 4:
+                m.path = self.nav.astar(m.pos[:2], nc, max_expand=2500) or []
+                m.path_t = self.t
+            while m.path and math.dist(m.path[0], m.pos[:2]) < 4:
+                m.path.pop(0)
+            tgt = m.path[0] if m.path else nc
+            vx, vy = tgt[0] - m.pos[0], tgt[1] - m.pos[1]
+            l = math.hypot(vx, vy) or 1
+            a["move"] = [vx / l * 0.7, vy / l * 0.7]
         return a
 
     # ------------------------------------------------------------------ loop
@@ -674,6 +798,11 @@ class Sim:
                     break
             dtm = time.perf_counter() - t0
             self.times.append(dtm)
+            dbg = act.get("debug") if act else None
+            if isinstance(dbg, dict):  # our bot reports its own compute time at the end of its label ("... 3ms")
+                mm = re.search(r"(\d+)ms$", str(dbg.get("label", "")))
+                if mm:
+                    self.bot_ms = max(self.bot_ms, int(mm.group(1)))
             if act is None:
                 self.late += 1
                 act = {k: v for k, v in self.last_action.items() if k in ("move", "aim", "boost")}
@@ -684,10 +813,7 @@ class Sim:
                     m.events = []
                     self.sounds[m.id] = []
                     self.apply(m, self.house(m))
-            if me.cubes in (1, 3, 6, 10) and getattr(me, "_offered", -1) != me.cubes:
-                me._offered = me.cubes
-                me.offer = {"id": me.cubes, "expires": self.t + 5, "choices": [
-                    {"id": "plating", "name": "p", "desc": ""}, {"id": "armor", "name": "a", "desc": ""}, {"id": "servos", "name": "s", "desc": ""}]}
+            self._offers(me)
             for _ in range(self.cfg["match"]["decide_every"]):
                 self.t += self.dt
                 for m in self.mechs:
@@ -708,8 +834,8 @@ class Sim:
                             m.events.append({"type": "damaged", "amount": self.zdps, "weapon": "zone", "bearing": None, "by": None})
                         if m.hp <= 0:
                             self._kill(m, None)
-                    elif self.t - m.last_combat > 5 and m.hp < m.max_hp:
-                        m.hp = min(m.max_hp, m.hp + 45 * self.dt)
+                    elif self.t - m.last_combat > m.mc["regen_delay"] and m.hp < m.max_hp:
+                        m.hp = min(m.max_hp, m.hp + m.mc["regen_per_s"] * self.dt)
                 for c in list(self.cubes):
                     best = None
                     for m in self.mechs:
@@ -719,10 +845,13 @@ class Sim:
                     if best:
                         self.cubes.remove(c)
                         best.cubes += 1
+                        old_max = best.max_hp
                         best.max_hp *= 1 + 0.04 / (1 + 0.04 * (best.cubes - 1)) if best.cubes <= 10 else 1
+                        best.hp += best.max_hp - old_max  # +4% max HP, healing the difference
                         best.events.append({"type": "pickup", "cubes": best.cubes})
                 self.tick += 1
                 self._zone_tick()
+                self._drops_tick()
             if self.verbose and self.tick % 200 == 0:
                 print(f"t={self.t:5.1f} hp={me.hp:6.0f} pos=({me.pos[0]:.0f},{me.pos[1]:.0f}) in_zone={math.dist(me.pos[:2], self.zone_now()[0]) <= self.zone_now()[1]} kills={me.kills} cubes={me.cubes} w={[w['kind'] for w in me.weapons if w]} alive={sum(m.alive for m in self.mechs)}", file=sys.stderr)
         # placement
@@ -743,7 +872,8 @@ class Sim:
                 "cubes": me.cubes, "weapons": [w["kind"] for w in me.weapons if w],
                 "p50ms": round(ts[len(ts) // 2] * 1000, 2), "maxms": round(ts[-1] * 1000, 1), "late": self.late,
                 "shots": self.st["shots"], "acc": round(self.st["hits"] / max(1, self.st["shots"]), 3),
-                "dealt": round(self.st["dealt"]), "taken": round(self.st["taken"]), "zone_dmg": round(self.st["zone"])}
+                "dealt": round(self.st["dealt"]), "taken": round(self.st["taken"]), "zone_dmg": round(self.st["zone"]),
+                "upg": me.upg, "botms": self.bot_ms, "drops": self.st.get("drops", 0)}
 
 
 def main():

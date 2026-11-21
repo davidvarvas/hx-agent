@@ -7,6 +7,7 @@ import heapq
 import json
 import math
 import os
+import time
 
 import numpy as np
 
@@ -216,9 +217,10 @@ class NavMap:
                 return best[1], best[2]
         return None
 
-    def astar(self, start, goal, max_expand=3000, weight=1.5):
+    def astar(self, start, goal, max_expand=3000, weight=1.5, deadline=None):
         """Weighted A* on the 4 m coarse grid between world points. Returns world (x, y) waypoints
-        (string-pulled on the fine grid), or a partial path toward the goal, or None."""
+        (string-pulled on the fine grid), or a partial path toward the goal, or None. With `deadline`
+        (a time.perf_counter() value) the search stops there and returns the best partial path."""
         s = self._cnear(*start)
         g = self._cnear(*goal, max_r=15)
         if s is None or g is None:
@@ -243,12 +245,15 @@ class NavMap:
         best = (1e18, si)
         push = heapq.heappush
         pop = heapq.heappop
+        clock = time.perf_counter
         while openh and exp < max_expand:
             f, cur = pop(openh)
             if cur == gi:
                 best = (0, cur)
                 break
             exp += 1
+            if deadline is not None and not exp & 127 and clock() > deadline:
+                break
             cj, ci = divmod(cur, nx)
             gc = gs[cur]
             hcur = abs(ci - gx) + abs(cj - gy)

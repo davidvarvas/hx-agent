@@ -79,6 +79,9 @@ class Bot:
         self.goal = None           # [key, best_dist, t_progress, hp, t_last_tracked] of the current loot/farm goal
         self.bad_goals = {}        # key -> time until which we leave it alone (no progress)
         self.known_pickups = {}    # id -> (kind, pos, t_seen): weapons we have seen (they never despawn)
+        self.aimed_n = {}          # id -> consecutive observations with its aim on us
+        self.hostile_until = {}    # id -> time until which we treat it as hunting us
+        self.hostiles = []
         gc.collect()
         gc.freeze()
 
@@ -111,7 +114,9 @@ class Bot:
         for e in enemies:
             e["d"] = math.dist(e["pos"][:2], (x, y))
             self.last_seen[e["id"]] = (e["pos"], t)
+            self._classify(e)
         enemies.sort(key=lambda e: e["d"])
+        self.hostiles = [e for e in enemies if e["hostile"]]
 
         zone_goal, zone_urgent = self._zone_goal(obs)
         target = self._choose_target(enemies)
@@ -321,11 +326,25 @@ class Bot:
         return mx, my
 
     # ================================================================== targets
+    def _classify(self, e):
+        """Hostile = damaged us in the last 10 s, or has held its aim on us for ~0.5 s (hunting us).
+        Only hostiles are fought: house bots that are not hunting fight back only once attacked, so
+        starting fights with them just adds enemies (sim: never starting them beat every opportunity rule)."""
+        t = self.t
+        x, y = self.pos[0], self.pos[1]
+        b = math.atan2(y - e["pos"][1], x - e["pos"][0])
+        aimed = abs(wrap(e["aim"][0] - b)) < max(0.12, math.atan2(4.0, max(1.0, e["d"])))
+        n = self.aimed_n.get(e["id"], 0) + 1 if aimed else 0
+        self.aimed_n[e["id"]] = n
+        if n >= 5 or t - self.attackers.get(e["id"], -99) < 10 or (aimed and e.get("charging")):
+            self.hostile_until[e["id"]] = t + 10.0
+        e["hostile"] = self.hostile_until.get(e["id"], -1.0) > t
+
     def _choose_target(self, enemies):
         best, bs = None, 1e9
         t = self.t
         for e in enemies:
-            if e["d"] > 260:
+            if e["d"] > 260 or not e["hostile"]:
                 continue
             hpf = e["hp"] / max(1.0, e.get("max_hp", 1400))
             s = e["d"] / 90.0 + hpf * 1.6
@@ -353,7 +372,7 @@ class Bot:
     def _should_retreat(self, tgt, enemies):
         my = self.me["hp"]
         th = tgt["hp"]
-        close = [e for e in enemies if e["d"] < 120]
+        close = [e for e in self.hostiles if e["d"] < 120]
         if self.hp_frac < 0.3 and th > my * 0.8:
             return True
         if self.hp_frac < 0.55 and len(close) >= 2:
@@ -363,7 +382,7 @@ class Bot:
         return False
 
     def _outnumbered(self, enemies):
-        close = [e for e in enemies if e["d"] < 170]
+        close = [e for e in self.hostiles if e["d"] < 170]
         return len(close) >= 2
 
     def _has_los(self, e):
@@ -494,11 +513,12 @@ class Bot:
                 cone = math.radians(s.get("cone_deg", 30)) / 2
                 cost = s.get("energy", 3)
                 if me["energy"] > cost + 8:
-                    for o in enemies:
+                    # the arc hits the nearest mech in the cone: only fire when that one is ours to fight
+                    for o in enemies:  # sorted by distance
                         if o["d"] < rng * 0.95:
                             b = math.atan2(o["pos"][1] - self.pos[1], o["pos"][0] - self.pos[0])
-                            if abs(wrap(b - me["aim"][0])) < cone * 0.85 and (o is not e or los):
-                                fire[i] = True
+                            if abs(wrap(b - me["aim"][0])) < cone * 0.85:
+                                fire[i] = (o is e and los) or (o is not e and o["hostile"])
                                 break
             elif k == "laser":
                 charge = w.get("charge", 0) or 0
@@ -588,7 +608,7 @@ class Bot:
         need = (self.path is None or self.path_goal is None or math.dist(self.path_goal, goal) > 15
                 or self.t - self.path_t > 4.0) and self.t - self.path_t > 0.8
         if need and self._heavy_ok():
-            self.path = n.astar((x, y), (gx, gy), max_expand=3000)
+            self.path = n.astar((x, y), (gx, gy), max_expand=3000, deadline=self.t0 + 0.010)
             self.path_goal = goal
             self.path_t = self.t
             self.heavy_used = True
@@ -662,7 +682,8 @@ class Bot:
         x, y, z = self.pos
         t = self.t
         n = self.nav
-        threats = [e for e in enemies if e["d"] < 200][:5]
+        threats = [e for e in enemies if e["d"] < 200 and (e["hostile"] or e is fight_target)][:5] \
+            or [e for e in enemies if e["d"] < 200][:3]
         if n is not None and threats and (self.cover is None or t - self.cover_t > 0.7) and self._heavy_ok():
             self.heavy_used = True
             self.cover_t = t
