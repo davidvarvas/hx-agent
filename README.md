@@ -1,12 +1,27 @@
-# survivor — Mech Royale bot
+# Mech Royale bot: team "404 Competition Not Found"
 
-A mechfight/1 bot that plays for placement:
+A bot for the Builders Buildathon **Mech Royale** track. It speaks `mechfight/1` JSON lines on stdin/stdout.
 
-- **Zone first:** rotates into the next circle before it shrinks; never steps across the closing edge.
-- **Fights facing the enemy** (rear hits do 1.5x), strafing with lead-aimed gun fire; laser is charged and released on target; lightning fires when someone is in the cone; mortar lobs over cover.
-- **Outnumbered:** moves to the nearby spot the fewest enemies can see while keeping its target in view; when losing, breaks line of sight to regenerate.
-- **Between fights:** takes cubes, weapons (lightning > laser > mortar, keeps the gun), crates, NPC drones and supply drops.
-- **Upgrades:** plating, armor, repair nanites first.
+## Credit
+`bot.py` is built on **[mech-royale by LanceHuang245](https://github.com/LanceHuang245/mech-royale)** (commit
+`171bc06`, MIT License, Copyright (c) 2026 LanceHuang245). It is the strongest public entry we found, with 4.75 in
+practice in this configuration (all strategy switches off). The license notice is in
+`third_party/LanceHuang245-mech-royale-LICENSE`, and the credit is repeated at the top of `bot.py`. Every change we
+make on top of it is listed in `CHANGELOG.md`. `mechfight.py` is the official kit's Python wrapper, unchanged.
 
-Files: `bot.py` (decisions), `nav.py` (2 m grid of the map: line of sight with numpy, A* on a 4 m grid), `mechfight.py` (stdin/stdout loop).
-Answers in ~1 ms typically, under 10 ms worst case.
+## Files
+| Path | What it is |
+| --- | --- |
+| `Dockerfile` | The image the scorer builds: pinned Python base, standard library only. |
+| `bot.py` | The bot (see Credit). |
+| `mechfight.py` | The kit's stdin/stdout wrapper. |
+| `third_party/` | License notices for code we build on. |
+| `tools/docker_check.sh` | Builds the image and runs the kit's check in the match sandbox, plus a linux/amd64 build. |
+| `tools/sim.py`, `tools/batch.py` | A rough local simulator. It isn't the real game, and it has mis-ranked tactics. |
+| `tools/live.py` | Plays one private match on the public play server (a free-for-all with the server's bots). |
+| `nav.py` | Map model used by `tools/sim.py` only. It isn't in the image. |
+
+## Check before submitting
+```sh
+tools/docker_check.sh        # needs Docker; the kit must sit next to this repo as ../mechfight-kit
+```

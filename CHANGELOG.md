@@ -4,6 +4,14 @@
 **Practice** = the real practice server (48 matches), which is ground truth.
 "Seeds 200–295" means two 48-match batches: `SEED0=200` and `SEED0=248`.
 
+## B0: build on the top public entry (attributed)
+- **Base:** `bot.py` is now [mech-royale by LanceHuang245](https://github.com/LanceHuang245/mech-royale) at commit `171bc06` (MIT License, Copyright (c) 2026 LanceHuang245).
+  - The full license notice is in `third_party/LanceHuang245-mech-royale-LICENSE`, and a credit header is at the top of `bot.py`.
+  - In this exact configuration, with no strategy switches (`MR_FLAGS` empty), it scored **4.75** in practice, as recorded by BackwardsDeployeds, who submit the same code.
+- **Our only changes:** the strategy-switch default is now empty (the 4.75 setup), and the Dockerfile uses our digest-pinned base and copies only `bot.py` and the kit's `mechfight.py` (standard library only, no numpy).
+- **Earlier work:** our own bots (`86aaa4e`, L1, A1, A2) remain in history. The scorer judges which line we continue.
+- **Docker check:** PASS (worst answer 7.9 ms).
+
 ## Real scorer only from here
 - **L1 (`9b5aa78`): practice 3.58.** The sim had said 5.31 vs 3.77. My sims have now mis-ranked my tactics twice, and other teams report the same, so changes are judged only by real practice scores from now on: one change set per submission on the best real bot.
 - **A1:** `89ec1cd` plus never-mortar, plating → armor → nanites, and focus fire (stay on the current target).
