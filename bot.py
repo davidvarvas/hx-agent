@@ -80,6 +80,7 @@ class Bot:
         self.scan_phase = self.rng.random() * TAU
         self.heavy_used = False
         self.last_heavy_t = -99.0
+        self.ret_latch = False
         gc.collect()
         gc.freeze()
 
@@ -127,9 +128,7 @@ class Bot:
         aim_point = None   # world point to aim at (non-combat)
 
         # ---------------- movement decision
-        finishing = (fight and target["clear"] and self._enemy_health(target) <= 0.30 and target["d"] < 130
-                     and self.hp_frac > 0.30)
-        retreat = target is not None and not finishing and self._should_retreat(target, enemies)
+        retreat = target is not None and self._should_retreat(target, enemies)
         final_move = self._final_approach(obs["zone"], fight)
         if final_move is not None:
             move = final_move
@@ -143,9 +142,7 @@ class Bot:
         elif retreat and not (target["d"] < 38 or t - self.last_dmg_t < 0.6 and self.target_los):
             move, label = self._retreat(enemies, zone_goal, obs)
             boost = me["energy"] > 30 and t - self.last_dmg_t < 1.5
-        elif (grab := self._near_cube(obs, enemies, target, fight)) is not None:
-            move, label = grab
-        elif fight and not finishing and self._outnumbered(enemies):
+        elif fight and self._outnumbered(enemies):
             move, label = self._retreat(enemies, zone_goal, obs, fight_target=target)
             boost = me["energy"] > 45 and t - self.last_dmg_t < 1.0
         elif fight:
@@ -392,8 +389,6 @@ class Bot:
             score += 0.7 if not enemy["clear"] else 0.0
             score -= 1.1 if enemy["aggressor"] else 0.0
             score -= 0.25 if enemy["rear_angle"] > math.radians(self.mech["front_arc_deg"]) / 2 else 0.0
-            if enemy["clear"] and self._enemy_health(enemy) <= 0.30:
-                score -= 1.2  # finish it: a kill is a placement and drops its cubes
             if score < best_score:
                 best, best_score = enemy, score
         return best
@@ -417,39 +412,20 @@ class Bot:
         return not early and advantage and target["d"] < gun_range * 0.5
 
     def _should_retreat(self, tgt, enemies):
-        my = self.me["hp"]
-        th = tgt.get("hp", self.mech["hp"])
-        close = [e for e in enemies if e["d"] < 120]
-        if self.hp_frac < 0.3 and th > my * 0.8:
+        """Hide and regenerate below 38% HP until 80% (or 60% after 12 s untouched); also take cover when three
+        enemies (two when under 60% HP) have a clear shot at us."""
+        hp = self.hp_frac
+        if hp < 0.38:
+            self.ret_latch = True
+        elif self.ret_latch and (hp > 0.80 or (self.t - self.last_dmg_t > 12.0 and hp > 0.60)):
+            self.ret_latch = False
+        if self.ret_latch:
             return True
-        if self.hp_frac < 0.55 and len(close) >= 2:
-            return True
-        if len(close) >= 3 and self.hp_frac < 0.85:
-            return True
-        return False
+        shooters = [e for e in enemies if e["d"] < 240 and e.get("clear")]
+        return len(shooters) >= 3 or (len(shooters) >= 2 and hp < 0.6)
 
     def _outnumbered(self, enemies):
         return sum(e["d"] < 170 and (e["clear"] or e["aggressor"]) for e in enemies) >= 2
-
-    def _near_cube(self, obs, enemies, target, fight):
-        """A cube close by is worth more than a few shots: +4% HP and damage, and upgrade offers."""
-        if self.hp_frac <= 0.35 or sum(e["d"] < 240 for e in enemies) > 1:
-            return None
-        x, y, z = self.pos
-        best = None
-        for c in obs.get("cubes") or []:
-            cp = c["pos"]
-            if abs(cp[2] - z) > 3.5 and abs(cp[2] - self._ground(cp)) > 1:
-                continue
-            dd = math.dist((x, y), cp[:2])
-            if dd < 70 and (best is None or dd < best[0]):
-                best = (dd, cp)
-        if best is None:
-            return None
-        dd, cp = best
-        if dd < 10 or not fight or target is None or target["d"] > 60:
-            return self._navigate(cp[:2]), "grab cube"
-        return None
 
     def _enemy_health(self, actor):
         maximum = actor.get("max_hp", self.mech["hp"])
@@ -876,27 +852,6 @@ class Bot:
                 ax, ay = norm2(x - lx, y - ly) if dd > 0.5 else (math.cos(self.t), math.sin(self.t))
                 mx += ax * 2.0
                 my += ay * 2.0
-        for p in obs.get("projectiles") or []:
-            if p["kind"] not in ("gun", "npc"):
-                continue
-            px, py, pz = p["pos"]
-            vx, vy, vz = p["vel"]
-            vv = vx * vx + vy * vy + vz * vz
-            if vv < 1.0:
-                continue
-            cz = z + 4.5
-            tc = ((x - px) * vx + (y - py) * vy + (cz - pz) * vz) / vv
-            if not 0.02 <= tc <= 0.45:
-                continue
-            ox, oy, oz = px + vx * tc - x, py + vy * tc - y, pz + vz * tc - cz
-            if ox * ox + oy * oy + oz * oz > 3.8 * 3.8:
-                continue
-            nx_, ny_ = norm2(-vy, vx)  # across the round's path
-            side = -1.0 if nx_ * ox + ny_ * oy > 0 else 1.0
-            if abs(nx_ * ox + ny_ * oy) < 0.3:
-                side = float(self.strafe)
-            mx += nx_ * side
-            my += ny_ * side
         for e in obs["mechs"]:
             if e.get("charging") and e["kind"] == "mech":
                 ex, ey = e["pos"][0], e["pos"][1]

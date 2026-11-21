@@ -4,6 +4,21 @@
 **Practice** = the real practice server (48 matches), which is ground truth.
 "Seeds 200–295" means two 48-match batches: `SEED0=200` and `SEED0=248`.
 
+## Own-code experiments: one idea per submission on `89ec1cd` (4.08)
+Each is our GPT bot `89ec1cd` plus one idea taken from public write-ups (no code), judged only by the real practice score.
+
+| Candidate | Commit | Change | Practice |
+| --- | --- | --- | --- |
+| A1 | `6482379` | never carry a mortar; plating → armor → nanites; focus fire | pending |
+| A2 | `94acb5d` | finish off clear targets under 30% HP; grab cubes within 70 m before fighting; dodge gun rounds | pending |
+| A3 | see git log | retreat discipline: hide below 38% HP until 80% (or 60% after 12 s untouched); cover when 3+ enemies (2+ under 60% HP) have a clear shot | pending |
+| A4 | see git log | laser + lightning loadout (the gun makes room for the second special); never a mortar | pending |
+
+The research also found evidence from other teams' public logs of what did *not* help for real:
+- cube farming until 8 cubes
+- long-range play
+- rooftop camping
+
 ## Back to our own code (withdrawing B0–B2)
 - **The rule** (quoted from the buildathon's Blast Radius track page): "One team a person, and your own team's repository. No sharing code between teams: top entries are compared, and you may be asked to explain yours."
 - **Withdrawn:** B0, B1 and B2 were built on another team's (MIT-licensed, credited) bot, so they don't meet this rule.
