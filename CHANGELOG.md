@@ -4,6 +4,15 @@
 **Practice** = the real practice server (48 matches), which is ground truth.
 "Seeds 200–295" means two 48-match batches: `SEED0=200` and `SEED0=248`.
 
+## v5: free-for-all detection, third-party kills
+- **Detection:** practice house bots never kill each other, so deaths the bot didn't cause (`mechs − alive − own kills`; one before 150 s, or two after) mean a free-for-all. It's then latched for the match; in one test it was detected at 12.6 s.
+- **Third-party (free-for-all only):** join in on a non-hostile mech below 45% HP that lost HP to someone else in the last 4 s, within 120 m, while the bot is above 50% HP with at most one hostile on it.
+- **Sim D** (sim B plus the real 130 m spawn spacing instead of 90 m; seeds 200–295): v4 practice 6.07 and free-for-all 12.00.
+- **v5 results:**
+  - Practice: 6.06 (−0.01 ± 0.08; 89 of 96 matches identical, so it's off as intended).
+  - Free-for-all: 12.12 (+0.12 ± 0.23). Docker check: PASS.
+- **Seen in free-for-all traces:** early deaths come from being shot in the back (1.5× damage) by a second attacker outside the 120° field of view while dueling.
+
 ## v4: crash-proofing, react to being shot
 - **Crash fix:** enemy fields the server may hide or send as null (HP when `vision.show_enemy_hp` is off, aim, velocity, cubes) now get neutral defaults. Before, a replay of the check stream with enemy HP hidden crashed `act()` every tick and left the mech coasting. Now: 0 errors.
 - **Juke:** when the bot is standing still (cover, healing, holding) and gets hit, it strafes across the line of fire.

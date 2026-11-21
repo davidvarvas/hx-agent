@@ -124,7 +124,7 @@ class Sim:
                 continue
             if not n.is_free(x, y):
                 continue
-            if all(math.dist((x, y), s) > 90 for s in spawns):
+            if all(math.dist((x, y), s) > self.cfg["match"].get("spawn_min_separation", 130) for s in spawns):
                 spawns.append((x, y))
         self.me_id = self.rng.randrange(16)
         self.mechs = [Mech(i, (s[0], s[1], n.ground_at(*s)), self.cfg) for i, s in enumerate(spawns)]

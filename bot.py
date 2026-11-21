@@ -83,6 +83,11 @@ class Bot:
         self.hostile_until = {}    # id -> time until which we treat it as hunting us
         self.hostiles = []
         self.last_dmg_bearing = 0.0
+        self.hit_on = {}           # id -> last time we hit it
+        self.mech_hp = {}          # id -> (last seen hp, last time it lost hp to someone else)
+        self.my_kills = 0
+        self.ffa = False           # set once mechs die that we did not kill (house bots never kill each other)
+        self.n_mechs = cfg["match"].get("mechs", 16)
         gc.collect()
         gc.freeze()
 
@@ -103,6 +108,12 @@ class Bot:
         self.eye = st.get("eye_height", 8.0)
         act = {"tick": obs["tick"]}
         self._events(obs)
+        # free-for-all or practice? In practice the house bots never kill each other, so deaths we did not
+        # cause (before the zone starts killing) mean everyone is fighting everyone
+        others_dead = self.n_mechs - obs.get("alive", self.n_mechs) - self.my_kills
+        if not self.ffa and others_dead >= (1 if t < 150 else 2):
+            self.ffa = True
+            mf.log(f"t={t:.1f}: free-for-all ({others_dead} deaths we did not cause)")
         if obs.get("offer"):
             act["pick"] = self._pick_upgrade(obs["offer"])
 
@@ -231,6 +242,9 @@ class Bot:
                         self.threats.append((ev["bearing"], t, 3.0 if ev.get("rear") else 2.0))
             elif et == "hit":
                 self.last_hit_t = t
+                self.hit_on[ev.get("target")] = t
+            elif et == "kill":
+                self.my_kills += 1
             elif et == "take_failed":
                 self.bad_pickups[ev.get("id")] = t
                 if ev.get("reason") == "gone":
@@ -357,6 +371,22 @@ class Bot:
         if n >= 5 or t - self.attackers.get(e["id"], -99) < 10 or (aimed and e.get("charging")):
             self.hostile_until[e["id"]] = t + 10.0
         e["hostile"] = self.hostile_until.get(e["id"], -1.0) > t
+        # HP lost to someone else (not us): a fight we could join
+        prev = self.mech_hp.get(e["id"])
+        if prev is not None and e["hp"] < prev[0] - 1.0 and t - self.hit_on.get(e["id"], -99) > 0.5:
+            self.mech_hp[e["id"]] = (e["hp"], t)
+        else:
+            self.mech_hp[e["id"]] = (e["hp"], prev[1] if prev else -99.0)
+
+    def _third_party(self, e):
+        """Free-for-all only: finish a mech that is badly hurt and busy losing HP to someone else. In
+        practice house bots never fight each other, so this does not fire there."""
+        if not self.ffa or self.hp_frac < 0.5 or len(self.hostiles) > 1 or e["d"] > 120:
+            return False
+        if e["hp"] / max(1.0, e["max_hp"]) > 0.45:
+            return False
+        engaged = self.t - self.hit_on.get(e["id"], -99) < 3.0  # we already joined in: keep at it
+        return engaged or self.t - self.mech_hp.get(e["id"], (0, -99.0))[1] < 4.0
 
     def _hostile_los(self):
         """Line of sight from our muzzle to each hostile's centre, in one batched check."""
@@ -384,7 +414,7 @@ class Bot:
         best, bs = None, 1e9
         t = self.t
         for e in enemies:
-            if e["d"] > 260 or not e["hostile"]:
+            if e["d"] > 260 or not (e["hostile"] or self._third_party(e)):
                 continue
             hpf = e["hp"] / max(1.0, e.get("max_hp", 1400))
             s = e["d"] / 90.0 + hpf * 1.6
