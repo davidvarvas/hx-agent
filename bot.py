@@ -481,6 +481,16 @@ class Bot:
             enemy["rear_angle"] = facing_error
 
     def _choose_target(self, enemies):
+        if len(enemies) > 1 and not self.ffa:
+            weapon_range = max((weapon["stats"]["range"] for weapon in self.me["weapons"] if weapon),
+                               default=0.0)
+            reach = min(weapon_range, self.W["laser"]["range"])
+            recent = self.t - self.me["stats"]["regen_delay"]
+            shooters = [enemy for enemy in enemies
+                        if enemy["clear"] and self.attackers.get(enemy["id"], -math.inf) > recent
+                        and math.dist(self.pos, enemy["pos"]) < reach]
+            if shooters:
+                enemies = shooters
         best, best_score = None, math.inf
         for enemy in enemies:
             if enemy["d"] > self.W["laser"]["range"]:
@@ -681,10 +691,6 @@ class Bot:
         mz = z + self.muzzle
         return (math.atan2(p[1] - y, p[0] - x), math.atan2(p[2] - mz, max(0.1, math.hypot(p[0] - x, p[1] - y))))
 
-    def _opening_unarmed(self, weapons):
-        return (not self.ffa and len(weapons) == 1 and "gun" in weapons
-                and self.t < self.cfg["zone"]["phases"][0]["hold_s"])
-
     def _idle_aim(self, obs, move):
         t = self.t
         # most recent weighted threat bearing
@@ -696,10 +702,6 @@ class Bot:
                 sy += math.sin(b) * k
             if math.hypot(sx, sy) > 0.3:
                 return (math.atan2(sy, sx), 0.0)
-        # An unarmed opening searches every direction while holding position.
-        if self.hp_frac >= 0.65 and self._opening_unarmed(self._weapons()) and math.hypot(*move) < 0.1:
-            search_rate = self.me["stats"]["turn_rate"] * 0.5
-            return self.scan_phase + t * search_rate, 0.0
         # sweep around the direction of travel (or the zone centre when standing still)
         if abs(move[0]) + abs(move[1]) > 0.2:
             base = math.atan2(move[1], move[0])
@@ -1212,17 +1214,12 @@ class Bot:
             dd = math.dist((x, y), cp[:2])
             if dd < (90 if now else 120) and ok(cp[:2]) and (best is None or dd < best[0]):
                 best = (dd, cp)
-        cube = best
-        arming = self._opening_unarmed(wk)
-        if cube and (not arming or cube[0] <= 2 * self.reach):
-            return self._navigate(cube[1][:2]), None, "cube"
+        if best:
+            return self._navigate(best[1][:2]), None, "cube"
 
         # weapons worth taking (seen now or remembered); with only the gun, a special is worth a long walk
         best = None
         far = 220 if len(wk) == 1 else 160
-        visible_range = max(110, min(far, self.cfg["vision"]["range"])) if arming else 110
-        equip = self.cfg["loot"]["equip_s"]
-        speed = me["stats"]["walk_speed"]
         for pid, kind, pp, now in self._loot_known(False):
             if pid in self.bad_pickups and t - self.bad_pickups[pid] < 20:
                 continue
@@ -1232,24 +1229,16 @@ class Bot:
                 if me["energy"] < 70:
                     continue  # on a roof: only when we can jet up
             dd = math.dist((x, y), pp[:2])
-            if dd >= (visible_range if now else far):
-                continue
-            eta = dd / speed + equip
-            if not self._in_zone_later(obs, pp[:2], max(10.0, eta) if arming else 10.0, 10.0):
-                continue
-            priority = dd - speed * equip if arming and kind == "laser" else dd
-            if best is None or priority < best[0]:
-                best = (priority, dd, pp)
+            if dd < (110 if now else far) and ok(pp[:2]) and (best is None or dd < best[0]):
+                best = (dd, pp)
         if best:
-            _, dd, pp = best
+            dd, pp = best
             mv = self._navigate(pp[:2])
             if pp[2] - z > 2.0 and dd < 12:
                 self.jet_until = max(self.jet_until, t + 1.2)
                 if me["grounded"]:
                     self.want_jump = True
             return mv, None, "weapon"
-        if cube:
-            return self._navigate(cube[1][:2]), None, "cube"
 
         quiet = self.ffa and FFA_QUIET and any(t - ts < 12 and math.dist(p[:2], (x, y)) < 250
                                                for p, ts in self.last_seen.values())
