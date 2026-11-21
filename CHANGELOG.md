@@ -4,6 +4,21 @@
 **Practice** = the real practice server (48 matches), which is ground truth.
 "Seeds 200–295" means two 48-match batches: `SEED0=200` and `SEED0=248`.
 
+## Real result and sim E (armed house bots)
+- **Practice for `86aaa4e`: 3.60.** That's below the prediction (3.9) and below the GPT bot's best (4.08). The GPT bot's four practice runs averaged 3.92 (3.79–4.08), so one run's noise is about ±0.3.
+- **Sim E (`ARMED=1`, now the default):** house bots pick up weapons and use lasers and lightning, as the real ones did in live matches. Calibration, 96 matches each:
+
+  | Bot | Sim E | Real practice |
+  | --- | ---: | ---: |
+  | Kit example bot | 0.78 | 1.15 |
+  | GPT `89ec1cd` | 3.33 | 4.08 (3.92 average) |
+  | this repo `86aaa4e` | 3.38 | 3.60 |
+
+- **What sim E shows:**
+  - Sim E is in the real range, about 0.4 too pessimistic. The earlier sims were about 1.6× too optimistic.
+  - It rates the two bots about equal, consistent with the real gap being mostly noise.
+  - Damage taken: guns 61%, lasers 25%, lightning 14%. Most deaths happen at 120–180 s, when this sim adds two hunters.
+
 ## Research: public entries and live matches
 Other teams' repos are public by rule. I read their READMEs for ideas only; no code was copied. Ideas tried here:
 - **Fight at long range (BingBU, 4.15):** its README says the weaker house bots stop hitting at about 145 m.

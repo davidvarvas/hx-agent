@@ -35,6 +35,8 @@ DEFEND = int(os.environ.get("DEFEND", "1"))
 # FFA=1: the finals' free-for-all instead of practice: every house bot fights the nearest mech it can see
 # (other house bots included); no hunting. Use SKILL tiers via --skill to set the field's strength.
 FFA = int(os.environ.get("FFA", "0"))
+# ARMED=1 (default): house bots loot weapons and use lasers and lightning, as the real house bots do.
+ARMED = int(os.environ.get("ARMED", "1"))
 KIT = os.environ.get("MF_KIT", os.path.join(os.path.dirname(os.path.dirname(HERE)), "mechfight-kit"))
 TAU = 2 * math.pi
 
@@ -589,6 +591,8 @@ class Sim:
                 obj.hurt_by, obj.hurt_t = src.id, self.t
             if obj.id == self.me_id:
                 self.st["taken"] += dmg
+                tw = self.st.setdefault("taken_w", {})
+                tw[weapon] = round(tw.get(weapon, 0) + dmg)
             obj.hp -= dmg
             obj.last_combat = self.t
             obj.events.append({"type": "damaged", "amount": round(dmg, 2), "weapon": weapon, "bearing": b, "by": src.id if src else None, "rear": rear})
@@ -660,8 +664,12 @@ class Sim:
 
     # ------------------------------------------------------------------ house bots
     def house(self, m):
+        m.cur_target = None
         if FFA:
-            return self._house_ffa(m)
+            return self._house_arms(m, self._house_ffa(m))
+        return self._house_arms(m, self._house_practice(m))
+
+    def _house_practice(self, m):
         me = self.mechs[self.me_id]
         sk = self.skill[m.id]
         noise = {"easy": 1.6, "medium": 1.1, "hard": 0.7, "expert": 0.4}[sk] * NOISE
@@ -710,6 +718,7 @@ class Sim:
                               math.atan2(tz - m.pos[2] - 7, d) + self.rng.gauss(0, math.radians(noise))]
             if hasattr(m, "goal_aim"):
                 a["aim"] = m.goal_aim
+                m.cur_target = me
                 if d < 200 and self.nav.los((m.pos[0], m.pos[1], m.pos[2] + 7), (me.pos[0], me.pos[1], me.pos[2] + 4.5)):
                     a["fire"] = [abs(wrap(m.aim[0] - m.goal_aim[0])) < 0.08, False]
         else:
@@ -814,8 +823,51 @@ class Sim:
                           math.atan2(tz - m.pos[2] - 7, max(d, 1.0)) + self.rng.gauss(0, math.radians(noise))]
         if hasattr(m, "goal_aim"):
             a["aim"] = m.goal_aim
+            m.cur_target = o
             if d < 200 and self.nav.los((m.pos[0], m.pos[1], m.pos[2] + 7), (o.pos[0], o.pos[1], o.pos[2] + 4.5)):
                 a["fire"] = [abs(wrap(m.aim[0] - m.goal_aim[0])) < 0.08, False]
+        return a
+
+    def _house_arms(self, m, a):
+        """ARMED=1: house bots pick up weapons on their way and use them, as the real ones do (in live matches
+        most finished with a laser, and lasers did much of the damage). Lightning fires inside its cone and
+        range; a laser charges fully and is let go when the torso is on target."""
+        if not ARMED:
+            return a
+        if m.weapons[1] is None:
+            best = None
+            for p in self.pickups:
+                if any(w and w["kind"] == p["kind"] for w in m.weapons):
+                    continue
+                d = math.dist(p["pos"][:2], m.pos[:2])
+                if d < self.cfg["loot"]["pickup_radius"] * 0.95 and abs(p["pos"][2] - m.pos[2]) < 4:
+                    a["take"] = p["id"]
+                    break
+                if d < 40 and (best is None or d < best[0]):
+                    best = (d, p)
+            if "take" not in a and best is not None and m.cur_target is None:
+                vx, vy = best[1]["pos"][0] - m.pos[0], best[1]["pos"][1] - m.pos[1]
+                l = math.hypot(vx, vy) or 1.0
+                a["move"] = [vx / l, vy / l]  # a short detour for a weapon when not fighting
+        o, w = m.cur_target, m.weapons[1]
+        if o is None or not o.alive or w is None or "aim" not in a:
+            if w is not None and w["kind"] == "laser" and w.get("charge", 0) > 0:
+                a.setdefault("fire", [False, False])
+                a["fire"] = [a["fire"][0], True]  # keep a charge held (it fires on its own after hold_s)
+            return a
+        d = math.dist(o.pos[:2], m.pos[:2])
+        los = self.nav.los((m.pos[0], m.pos[1], m.pos[2] + 7), (o.pos[0], o.pos[1], o.pos[2] + 4.5))
+        err = abs(wrap(m.aim[0] - a["aim"][0]))
+        st = w["stats"]
+        fire = list(a.get("fire") or [False, False])
+        if w["kind"] == "laser":
+            if w.get("charge", 0) > 0:
+                fire[1] = not (w["charge"] >= st["charge"] and err < 0.03 and los)
+            else:
+                fire[1] = los and d < st["range"] * 0.95 and w["cooldown"] <= 0 and err < 0.25
+        elif w["kind"] == "lightning":
+            fire[1] = los and d < st["range"] * 0.95 and err < math.radians(st["cone_deg"]) / 2 * 0.8 and m.energy > st["energy"] + 5
+        a["fire"] = fire
         return a
 
     def _zone_walk(self, m, zc, nc):
@@ -938,7 +990,8 @@ class Sim:
                 "p50ms": round(ts[len(ts) // 2] * 1000, 2), "maxms": round(ts[-1] * 1000, 1), "late": self.late,
                 "shots": self.st["shots"], "acc": round(self.st["hits"] / max(1, self.st["shots"]), 3),
                 "dealt": round(self.st["dealt"]), "taken": round(self.st["taken"]), "zone_dmg": round(self.st["zone"]),
-                "upg": me.upg, "botms": self.bot_ms, "drops": self.st.get("drops", 0)}
+                "upg": me.upg, "botms": self.bot_ms, "drops": self.st.get("drops", 0), "taken_w": self.st.get("taken_w", {}),
+                "house_armed": sum(1 for q in self.mechs if q is not me and q.weapons[1] is not None)}
 
 
 def main():
