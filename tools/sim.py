@@ -32,6 +32,9 @@ NOISE = float(os.environ.get("NOISE", "1"))
 # 0 = ignore it completely (original sim), 1 = shoot back for 8 s after the bot damages them,
 # 2 = also shoot whenever they can see it (they still only chase when hunting).
 DEFEND = int(os.environ.get("DEFEND", "1"))
+# FFA=1: the finals' free-for-all instead of practice: every house bot fights the nearest mech it can see
+# (other house bots included); no hunting. Use SKILL tiers via --skill to set the field's strength.
+FFA = int(os.environ.get("FFA", "0"))
 KIT = os.environ.get("MF_KIT", os.path.join(os.path.dirname(os.path.dirname(HERE)), "mechfight-kit"))
 TAU = 2 * math.pi
 
@@ -582,6 +585,8 @@ class Sim:
                 obj.hit_by_me = self.t
                 if weapon == "gun":
                     self.st["hits"] += 1
+            if src is not None:
+                obj.hurt_by, obj.hurt_t = src.id, self.t
             if obj.id == self.me_id:
                 self.st["taken"] += dmg
             obj.hp -= dmg
@@ -655,6 +660,8 @@ class Sim:
 
     # ------------------------------------------------------------------ house bots
     def house(self, m):
+        if FFA:
+            return self._house_ffa(m)
         me = self.mechs[self.me_id]
         sk = self.skill[m.id]
         noise = {"easy": 1.6, "medium": 1.1, "hard": 0.7, "expert": 0.4}[sk] * NOISE
@@ -752,6 +759,64 @@ class Sim:
                 m.max_hp += gain
                 m.hp += gain
         m.events.append({"type": "upgrade", "id": uid})
+
+    def _house_ffa(self, m):
+        """Free-for-all house bot (FFA=1): fights the nearest mech it can see within 150 m (whoever hit it in
+        the last 5 s first), walks with the zone otherwise, and gets back into the zone before fighting on."""
+        sk = self.skill[m.id]
+        noise = {"easy": 1.6, "medium": 1.1, "hard": 0.7, "expert": 0.4}[sk] * NOISE
+        zc, zr = self.zone_now()
+        nc = self.znext or zc
+        eye = lambda q: (q.pos[0], q.pos[1], q.pos[2] + 8)
+        if self.t - getattr(m, "tgt_t", -9) > 1.0 or getattr(m, "tgt", None) is None or not m.tgt.alive:
+            m.tgt_t = self.t
+            best = None
+            for o in self.mechs:
+                if o is m or not o.alive:
+                    continue
+                d = math.dist(o.pos[:2], m.pos[:2])
+                if d > 150 or not self.nav.los(eye(m), eye(o)):
+                    continue
+                s = d - (100 if getattr(m, "hurt_by", None) == o.id and self.t - getattr(m, "hurt_t", -9) < 5 else 0)
+                if best is None or s < best[0]:
+                    best = (s, o)
+            m.tgt = best[1] if best else None
+        o = m.tgt
+        a = self._zone_walk(m, zc, nc)
+        if o is None or not o.alive:
+            return a
+        d = math.dist(o.pos[:2], m.pos[:2])
+        outside = math.dist(m.pos[:2], zc) > zr - 15
+        los = self.nav.los(eye(m), (o.pos[0], o.pos[1], o.pos[2] + 5))
+        if not outside:
+            if d > 55 or not los:
+                if getattr(m, "fpath_t", -9) < self.t - 2:
+                    m.fpath = self.nav.astar(m.pos[:2], o.pos[:2], max_expand=2500) or []
+                    m.fpath_t = self.t
+                while m.fpath and math.dist(m.fpath[0], m.pos[:2]) < 4:
+                    m.fpath.pop(0)
+                tgt = m.fpath[0] if m.fpath else o.pos[:2]
+                vx, vy = tgt[0] - m.pos[0], tgt[1] - m.pos[1]
+                l = math.hypot(vx, vy) or 1
+                a["move"] = [vx / l, vy / l]
+            else:
+                ux, uy = (o.pos[0] - m.pos[0]) / max(d, 1e-6), (o.pos[1] - m.pos[1]) / max(d, 1e-6)
+                s = 1 if int(self.t / 1.3 + m.id) % 2 else -1
+                a["move"] = [-uy * s, ux * s]
+        if self.t - getattr(m, "react", -9) > {"easy": 0.6, "medium": 0.4, "hard": 0.25, "expert": 0.15}[sk]:
+            m.react = self.t
+            tx, ty, tz = o.pos[0], o.pos[1], o.pos[2] + 4.5
+            if sk != "easy":
+                tt = d / 252
+                tx += o.vel[0] * tt
+                ty += o.vel[1] * tt
+            m.goal_aim = [math.atan2(ty - m.pos[1], tx - m.pos[0]) + self.rng.gauss(0, math.radians(noise)),
+                          math.atan2(tz - m.pos[2] - 7, max(d, 1.0)) + self.rng.gauss(0, math.radians(noise))]
+        if hasattr(m, "goal_aim"):
+            a["aim"] = m.goal_aim
+            if d < 200 and self.nav.los((m.pos[0], m.pos[1], m.pos[2] + 7), (o.pos[0], o.pos[1], o.pos[2] + 4.5)):
+                a["fire"] = [abs(wrap(m.aim[0] - m.goal_aim[0])) < 0.08, False]
+        return a
 
     def _zone_walk(self, m, zc, nc):
         a = {"move": [0, 0], "fire": [False, False]}
@@ -879,7 +944,7 @@ class Sim:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seed", type=int, default=1)
-    ap.add_argument("--skill")
+    ap.add_argument("--skill", default=os.environ.get("SKILL"))  # easy|medium|hard|expert for every house bot
     ap.add_argument("-v", action="store_true")
     ap.add_argument("cmd", nargs=argparse.REMAINDER)
     a = ap.parse_args()

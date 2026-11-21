@@ -4,6 +4,16 @@
 **Practice** = the real practice server (48 matches), which is ground truth.
 "Seeds 200–295" means two 48-match batches: `SEED0=200` and `SEED0=248`.
 
+## v4: crash-proofing, react to being shot
+- **Crash fix:** enemy fields the server may hide or send as null (HP when `vision.show_enemy_hp` is off, aim, velocity, cubes) now get neutral defaults. Before, a replay of the check stream with enemy HP hidden crashed `act()` every tick and left the mech coasting. Now: 0 errors.
+- **Juke:** when the bot is standing still (cover, healing, holding) and gets hit, it strafes across the line of fire.
+- **Cover:** if the bot is hit at its cover spot, it picks a new spot at once instead of waiting up to 0.7 s.
+- **Shoot back:** targeting prefers hostiles in line of sight (one batched check), so the bot shoots back at whoever can be hit.
+- **Sim B:** 5.36 → 5.39 (+0.02 ± 0.25), neutral. Kept because these are plainly the right reactions.
+- **Free-for-all sim:** 11.85 vs 11.85 (48 matches, 15 expert house bots). Docker check: PASS.
+- **Tried and dropped:** upgrade order (sim B, 96 matches). Nanites first: −0.10 ± 0.12, identical in 89 of 96 matches. Damage first: −0.19 ± 0.22. Plating first stays.
+- **Free-for-all sim mode (`FFA=1`):** every house bot fights the nearest mech it can see within 150 m, preferring whoever hit it. `SKILL=expert` sets every house bot's tier. Against gun-only expert bots, the bot averages about 4th place. Its main loss is early deaths at spawn (9 of 48 within 30 s).
+
 ## v3: fight only mechs that are after us
 - **Hostile mechs:** a mech counts as hostile if it damaged the bot in the last 10 s, or has held its aim on the bot for about 0.5 s (hunting it).
   - Targeting, "outnumbered" and cover choice consider only hostiles.

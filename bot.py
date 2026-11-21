@@ -82,6 +82,7 @@ class Bot:
         self.aimed_n = {}          # id -> consecutive observations with its aim on us
         self.hostile_until = {}    # id -> time until which we treat it as hunting us
         self.hostiles = []
+        self.last_dmg_bearing = 0.0
         gc.collect()
         gc.freeze()
 
@@ -109,19 +110,32 @@ class Bot:
         while self.hist and self.hist[0][0] < t - 1.5:
             self.hist.pop(0)
 
-        enemies = [m for m in obs["mechs"] if m["kind"] == "mech"]
-        npcs = [m for m in obs["mechs"] if m["kind"] == "npc"]
+        mechs = obs.get("mechs") or []
+        for m in mechs:  # fields the rules let the server hide (vision.show_enemy_hp) or that may come back null
+            mh = m.get("max_hp") or 1400.0
+            m["max_hp"] = mh
+            if m.get("hp") is None:
+                m["hp"] = mh
+            if not m.get("aim"):
+                m["aim"] = [0.0, 0.0]
+            if not m.get("vel"):
+                m["vel"] = [0.0, 0.0, 0.0]
+            if m.get("cubes") is None:
+                m["cubes"] = 0
+        enemies = [m for m in mechs if m.get("kind") == "mech"]
+        npcs = [m for m in mechs if m.get("kind") == "npc"]
         for e in enemies:
             e["d"] = math.dist(e["pos"][:2], (x, y))
             self.last_seen[e["id"]] = (e["pos"], t)
             self._classify(e)
         enemies.sort(key=lambda e: e["d"])
         self.hostiles = [e for e in enemies if e["hostile"]]
+        self._hostile_los()
 
         zone_goal, zone_urgent = self._zone_goal(obs)
         target = self._choose_target(enemies)
         fight = target is not None and self._should_fight(target, enemies)
-        self.target_los = target is not None and self._has_los(target)
+        self.target_los = target is not None and target.get("los", True)
 
         move = (0.0, 0.0)
         boost = False
@@ -147,6 +161,9 @@ class Bot:
         else:
             move, aim_point, label = self._peaceful(obs, npcs, zone_goal)
 
+        if label not in ("capturing", "zone") and math.hypot(*move) < 0.25 and t - self.last_dmg_t < 0.6:
+            move = self._juke()  # being shot while standing still: never a good idea
+            label += " juke"
         if self.escape is not None and t < self.escape_until:
             move = self.escape
         move = self._dodge(obs, move)
@@ -210,6 +227,7 @@ class Bot:
                     if ev.get("by") is not None:
                         self.attackers[ev["by"]] = t
                     if ev.get("bearing") is not None:
+                        self.last_dmg_bearing = ev["bearing"]
                         self.threats.append((ev["bearing"], t, 3.0 if ev.get("rear") else 2.0))
             elif et == "hit":
                 self.last_hit_t = t
@@ -340,6 +358,28 @@ class Bot:
             self.hostile_until[e["id"]] = t + 10.0
         e["hostile"] = self.hostile_until.get(e["id"], -1.0) > t
 
+    def _hostile_los(self):
+        """Line of sight from our muzzle to each hostile's centre, in one batched check."""
+        hs = [e for e in self.hostiles if e["d"] < 260]
+        for e in self.hostiles:
+            e["los"] = True
+        if self.nav is None or not hs:
+            return
+        x, y, z = self.pos
+        A = [(x, y, z + self.muzzle)] * len(hs)
+        B = [(e["pos"][0], e["pos"][1], e["pos"][2] + 4.5 * (1 + 0.05 * e.get("cubes", 0))) for e in hs]
+        for e, v in zip(hs, self.nav.los_many(A, B)):
+            e["los"] = bool(v)
+
+    def _juke(self):
+        """Taking fire while standing still: strafe across the line of fire, switching side now and then."""
+        t = self.t
+        if t > self.strafe_until:
+            self.strafe = -self.strafe if self.rng.random() < 0.6 else self.strafe
+            self.strafe_until = t + 0.35 + self.rng.random() * 0.6
+        b = self.last_dmg_bearing
+        return self._steer_free(-math.sin(b) * self.strafe, math.cos(b) * self.strafe)
+
     def _choose_target(self, enemies):
         best, bs = None, 1e9
         t = self.t
@@ -348,6 +388,8 @@ class Bot:
                 continue
             hpf = e["hp"] / max(1.0, e.get("max_hp", 1400))
             s = e["d"] / 90.0 + hpf * 1.6
+            if not e.get("los", True):
+                s += 1.2  # prefer one we can actually shoot (likely the one shooting us)
             if t - self.attackers.get(e["id"], -99) < 3:
                 s -= 1.0
             if e.get("charging"):
@@ -684,7 +726,8 @@ class Bot:
         n = self.nav
         threats = [e for e in enemies if e["d"] < 200 and (e["hostile"] or e is fight_target)][:5] \
             or [e for e in enemies if e["d"] < 200][:3]
-        if n is not None and threats and (self.cover is None or t - self.cover_t > 0.7) and self._heavy_ok():
+        stale = self.cover is None or t - self.cover_t > 0.7 or (t - self.last_dmg_t < 0.3 and t - self.cover_t > 0.25)
+        if n is not None and threats and stale and self._heavy_ok():  # hit at our "cover": it isn't one any more
             self.heavy_used = True
             self.cover_t = t
             self.cover = self._find_spot(threats, obs, fight_target)
@@ -779,7 +822,7 @@ class Bot:
                 ax, ay = norm2(x - lx, y - ly) if dd > 0.5 else (math.cos(self.t), math.sin(self.t))
                 mx += ax * 2.0
                 my += ay * 2.0
-        for e in obs["mechs"]:
+        for e in obs.get("mechs") or []:
             if e.get("charging") and e["kind"] == "mech":
                 ex, ey = e["pos"][0], e["pos"][1]
                 b = math.atan2(y - ey, x - ex)
