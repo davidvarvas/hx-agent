@@ -4,6 +4,32 @@
 **Practice** = the real practice server (48 matches), which is ground truth.
 "Seeds 200–295" means two 48-match batches: `SEED0=200` and `SEED0=248`.
 
+## Research: public entries and live matches
+Other teams' repos are public by rule. I read their READMEs for ideas only; no code was copied. Ideas tried here:
+- **Fight at long range (BingBU, 4.15):** its README says the weaker house bots stop hitting at about 145 m.
+- **Avoid drone farming (Edgewise):** it argues placement matters more than cubes.
+- **Free-for-all detection (BingBU):** from deaths the bot didn't cause, the same idea as v5 here.
+- **The public play server (two teams' tools):** a private room fills the empty seats with the server's own bots. `tools/live.py` here is our own connector.
+
+**Live matches** (play server, private rooms; these are free-for-alls with the competition rules at 2× speed):
+- **House bots:** expert, red, crimson, skirmish and astra types. They loot, and lasers are common.
+- **`86aaa4e`:** 1st (5 kills), 4th (2 kills).
+- **Long-range variant** (gun duels at about 140 m): 4th, then 7th. In the 7th-place match, drones farmed at 55–85 m did 900 damage.
+- **Damage by distance** (2 matches): 98% of house-bot gun damage on us landed within 80 m, while about half their laser damage came from 80–120 m.
+
+## Tried and dropped: drone farming from beyond their chase range, duel range by loadout
+- **Drones:** farm from 95–125 m, beyond the drone's give-up distance (`npc.deaggro_range` + 5 m), instead of 55–85 m.
+- **Duel range by the target's visible loadout:**
+  - gun only: about 95 m (gun fire allowed up to 150 m)
+  - laser or mortar: 60 m
+  - lightning: 85 m
+  - when we have lightning: close in to 26 m
+- **Results:**
+  - Sim D: 6.24 (+0.18 ± 0.32), no difference.
+  - Live: 6th place, 0 kills. An expert with lightning killed it at close range, and 353 damage came from behind.
+- **Live record so far:** `86aaa4e` placed 1st and 4th, the long-range variant 4th and 7th, and this one 6th. There's no evidence either range change helps, so I dropped it.
+- **Drone damage:** by the rules, farming one drone from 55–85 m costs only about 75 HP, so the 900 drone damage was more likely the long-range variant drifting into drone territory.
+
 ## Calibration against real practice scores (sim D, 96 matches each)
 | Bot | Sim | Real practice |
 | --- | ---: | ---: |
