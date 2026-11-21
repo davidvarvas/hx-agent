@@ -22,7 +22,7 @@ from array import array
 import mechfight as mf
 
 TAU = 2 * math.pi
-FLAGS = set(x for x in os.environ.get("MR_FLAGS", "").split(",") if x)  # strategy switches; none by default (the verified 4.75 setup). Env MR_FLAGS overrides (dev only)
+FLAGS = set(x for x in os.environ.get("MR_FLAGS", "jink").split(",") if x)  # strategy switches; jink by default (see CHANGELOG B2). Env MR_FLAGS overrides (dev only)
 WANT_KINDS = ("laser", "lightning")
 UPGRADE_PRIORITY = [
     "plating", "armor", "nanites", "laser_damage", "lightning_efficiency", "gun_rate",
@@ -327,7 +327,7 @@ class Search:
 # Switches turned on once a free-for-all is detected (the qualifying round and the final). The original author's
 # 16-bot free-for-all simulations measured sneak +0.2 to +0.65 and patient +0.36 there, while both cost points
 # in practice, where they stay off.
-FFA_FLAGS = {"sneak", "patient"}
+FFA_FLAGS = set()  # sneak+patient measured -0.15 +- 0.23 in a 120-match free-for-all league: off
 
 
 class Bot:
@@ -384,6 +384,8 @@ class Bot:
         self.boosting = False
         self.flags = set(FLAGS)  # strategy switches (tools/arena.py sets them per instance)
         self.my_kills = 0
+        self.hp_seen = {}   # id -> (last hp, last time it lost hp to someone else)
+        self.hit_on = {}    # id -> last time we hit it
         self.ffa = False  # set once mechs die that we did not kill: practice house bots never kill each other
         self.n_mechs = cfg["match"].get("mechs", 16)
         self.hide_until = 0.0
@@ -695,6 +697,8 @@ class Bot:
             elif e["type"] == "kill":
                 self.last_kill_t = t
                 self.my_kills += 1
+            elif e["type"] == "hit" and e.get("target") is not None:
+                self.hit_on[e["target"]] = t
             elif e["type"] in ("took", "take_failed"):
                 self.known_picks.pop(e.get("id"), None)
         self.dmg_log = [d for d in self.dmg_log if t - d[0] < 2.5]
@@ -795,6 +799,19 @@ class Bot:
                 s -= 40
             if e["d"] > 285:
                 s += 1000
+            if "thirdp" in self.flags:
+                mid = m["id"]
+                prev = self.hp_seen.get(mid)
+                if prev is not None and m["hp"] < prev[0] - 1 and t - self.hit_on.get(mid, -99) > 0.5:
+                    self.hp_seen[mid] = (m["hp"], t)          # it is losing HP to someone else
+                else:
+                    self.hp_seen[mid] = (m["hp"], prev[1] if prev else -99.0)
+                busy = t - self.hp_seen[mid][1] < 3.0
+                aimed = abs(wrap(m["aim"][0] - math.atan2(y - m["pos"][1], x - m["pos"][0]))) < 0.25
+                if busy and not aimed:
+                    s -= 80   # third-party: it is fighting someone else
+                elif m["hp"] >= 0.95 * m["max_hp"] and not aimed and not (mid in self.attackers and t - self.attackers[mid] < 6):
+                    s += 60   # a fresh mech minding its own business: not a fair fight worth starting
             if s < best:
                 best, target = s, e
         self.target_id = target["m"]["id"] if target else None
@@ -810,12 +827,12 @@ class Bot:
             cands = []
             for c in obs["crates"]:
                 d = math.dist(c["pos"][:2], pos[:2])
-                if d < 150 and c["pos"][2] < z + 6:
+                if d < (210 if "econ" in self.flags else 150) and c["pos"][2] < z + 6:
                     cands.append((d, "crate", c, (c["pos"][0], c["pos"][1], c["pos"][2] + 1.2)))
-            if hp_frac > 0.55:
+            if hp_frac > (0.45 if "econ" in self.flags else 0.55):
                 for n in npcs:
                     d = math.dist(n["pos"][:2], pos[:2])
-                    if d < 140:
+                    if d < (180 if "econ" in self.flags else 140):
                         cands.append((d + 30, "npc", n, (n["pos"][0], n["pos"][1], n["pos"][2] + 1.75)))
             cands.sort(key=lambda c: c[0])
             for c in cands[:4]:
@@ -936,8 +953,8 @@ class Bot:
         mode = "roam"
         boost = False
         outranged = any("laser" in e["m"].get("weapons", []) and e["d"] > 70 for e in threats) and not has_laser
-        hurt = hp_frac < 0.38
-        if self.retreating and (hp_frac > 0.8 or (t - self.last_dmg_t > 12 and hp_frac > 0.6)):
+        hurt = hp_frac < (0.45 if "ret45" in self.flags else 0.38)
+        if self.retreating and (hp_frac > (0.85 if "ret45" in self.flags else 0.8) or (t - self.last_dmg_t > 12 and hp_frac > 0.6)):
             self.retreating = False
         if hurt and threats:
             self.retreating = True
@@ -1142,7 +1159,7 @@ class Bot:
         best = None
         for c in obs["cubes"]:
             d = math.dist(c["pos"][:2], pos[:2])
-            if d < 120 and c["pos"][2] < z + 6 and self._safe_point(zs, c["pos"]):
+            if d < (160 if "econ" in self.flags else 120) and c["pos"][2] < z + 6 and self._safe_point(zs, c["pos"]):
                 if best is None or d < best[0]:
                     best = (d, c["pos"][:2])
         if best and (not threats or best[0] < 20):
@@ -1162,11 +1179,11 @@ class Bot:
                 return obj["pos"][:2]
             return None
         # remembered crates (cube + 50% weapon each)
-        if hp_frac > 0.6 and not threats and self.known_crates:
+        if hp_frac > (0.5 if "econ" in self.flags else 0.6) and not threats and self.known_crates:
             bc = None
             for cid, cp in self.known_crates.items():
                 d = math.dist(cp[:2], pos[:2])
-                if d < 260 and cp[2] < z + 8 and self._safe_point(zs, cp) and (bc is None or d < bc[0]):
+                if d < (350 if "econ" in self.flags else 260) and cp[2] < z + 8 and self._safe_point(zs, cp) and (bc is None or d < bc[0]):
                     bc = (d, cp)
             if bc and bc[0] > 20:
                 return bc[1][:2]

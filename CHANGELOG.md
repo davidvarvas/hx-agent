@@ -4,6 +4,25 @@
 **Practice** = the real practice server (48 matches), which is ground truth.
 "Seeds 200–295" means two 48-match batches: `SEED0=200` and `SEED0=248`.
 
+## B2: `jink` on, free-for-all switches off
+- **Real practice:** B0 4.75 and B1 4.75, as expected; the team is 10th of 114.
+- **Free-for-all league:** the original author's 16-bot free-for-all simulator (`tools/league.py` in his MIT repo), run locally. It compares versions inside the same matches.
+  - 120 matches per comparison, noise ±0.22. Two A/A checks (identical bots) gave −0.09 and −0.17.
+  - Each switch against the plain bot:
+
+    | Switch | Effect |
+    | --- | --- |
+    | `sneak` | −0.12 |
+    | `patient` | +0.16 |
+    | `sneak` + `patient` (B1's free-for-all set) | −0.15 |
+    | `early` | −0.02 |
+    | `econ` (crates to 210 m, drones from 45% HP and to 180 m, cubes to 160 m, remembered crates to 350 m) | −0.00 |
+    | `ret45` (retreat at 45%, recover to 85%) | −0.05 |
+    | `thirdp` (prefer mechs losing HP to others; skip fresh mechs busy elsewhere) | −0.18 |
+    | `jink` (strafe direction flips every 0.35–0.9 s instead of 1.0–2.6 s) | **+0.27 ± 0.21** |
+- **B2:** `jink` on by default in every mode (the author's league also had it at +0.17). The free-for-all set is now empty. `econ`, `ret45` and `thirdp` stay available as switches, off.
+- **Practice:** pending.
+
 ## B1: free-for-all switches (our change on B0)
 - **Detection:** the bot spots a free-for-all from mechs dying that it didn't kill (`mechs − alive − own kills`; one death before 150 s, three after). Practice house bots never kill each other.
 - **What switches on:** in a free-for-all, the original author's `sneak` and `patient` switches. His 16-bot free-for-all league measured sneak +0.2 to +0.65 and patient +0.36 ± 0.22. Both cost points in practice, so they stay off there.
