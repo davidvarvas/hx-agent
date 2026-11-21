@@ -4,12 +4,28 @@
 **Practice** = the real practice server (48 matches), which is ground truth.
 "Seeds 200–295" means two 48-match batches: `SEED0=200` and `SEED0=248`.
 
+## D1: laser first + loot memory (on C12)
+- **Why: how teams reach 5+.** These come from public commit messages and notes; no code was read or copied.
+  - Wolverines (5.19) describe their best build as "mid-fight cube pickup, weapon memory, laser pref, plating first".
+  - The 5.10 team's notes credit that same build for their jump from 4.67 to 5.08.
+  - Two other teams' simulators agree that holding a laser early is the biggest lever: "laser from start" scored 5.0–6.0 against 2.0–3.6 without one.
+- **What we already had:** mid-fight cube pickup (A2 plus `_combat_loot`) and plating first (C2).
+- **What we lacked, and D1 adds:**
+  - **Laser first.** Our bot preferred lightning, and it even dropped a laser to take lightning. Now a laser beats lightning: lightning is swapped for a laser, never the other way round.
+  - **Loot memory.** Weapons and cubes are listed only while seen.
+    - The bot now remembers them for 45 s.
+    - It forgets one when the item should be in plain view (within 36 m, with line of sight) but is not listed.
+    - Remembered items count when grabbing nearby cubes (the cubes a kill drops) and when looting in quiet time: cubes up to 120 m; weapons up to 160 m, or 220 m when we hold only the gun.
+- **Checks:** kit check PASS; Docker sandbox PASS with a worst answer of 1.4 ms. Sim crash test: 24 matches, no errors, the bot's worst decision 12 ms. The sim is not used to rank this change.
+- **Practice:** pending (submit only after C12's score is in).
+
 ## Own-code: stacking on A2 (4.23, our best own-code score)
 | Candidate | Change on top of A2 | Practice |
 | --- | --- | --- |
-| C1 | A3's retreat discipline | pending |
-| C2 | A1's no mortar, plating → armor → nanites, and focus fire | pending |
-| C3 | A4's laser + lightning loadout, never a mortar | pending |
+| C1 | A3's retreat discipline | not submitted |
+| C2 | A1's no mortar, plating → armor → nanites, and focus fire | not submitted |
+| C3 | A4's laser + lightning loadout, never a mortar | not submitted |
+| C12 | C1 + C2 together (`041e1b9`) | pending (the one test the user is running) |
 
 ## Own-code experiments: one idea per submission on `89ec1cd` (4.08)
 Each is our GPT bot `89ec1cd` plus one idea taken from public write-ups (no code), judged only by the real practice score.

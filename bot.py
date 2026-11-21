@@ -18,7 +18,7 @@ except Exception:  # numpy missing: run without a map
 TAU = 2 * math.pi
 DEBUG = bool(__import__('os').environ.get('BOTDEBUG'))
 
-WEAPON_VALUE = {"lightning": 3.0, "laser": 2.7, "mortar": 1.6, "gun": 0.0}
+WEAPON_VALUE = {"laser": 3.0, "lightning": 2.5, "mortar": 1.6, "gun": 0.0}
 UPGRADE_ORDER = [
     "plating", "armor", "nanites", "gun_damage", "gun_rate", "lightning_efficiency", "laser_charge",
     "laser_damage", "servos", "gyros", "gun_mag", "lightning_range", "sensors", "gun_velocity",
@@ -82,6 +82,7 @@ class Bot:
         self.last_heavy_t = -99.0
         self.ret_latch = False
         self.focus_id, self.focus_t = None, -99.0
+        self.loot_mem = {}         # id -> (kind, pos, last seen): weapons and cubes we saw
         gc.collect()
         gc.freeze()
 
@@ -103,6 +104,7 @@ class Bot:
         self.muzzle = st["muzzle_height"]
         act = {"tick": obs["tick"]}
         self._events(obs)
+        self._remember_loot(obs)
         if obs.get("offer"):
             act["pick"] = self._pick_upgrade(obs["offer"])
 
@@ -234,6 +236,7 @@ class Bot:
                 self.bad_pickups[ev.get("id")] = t
             elif et == "took":
                 self.bad_pickups.pop(ev.get("id"), None)
+                self.loot_mem.pop(ev.get("id"), None)
         for s in obs.get("sounds") or []:
             k = s.get("kind")
             if k in ("gun", "laser", "laser_charge", "lightning", "mortar", "step", "boost", "jet", "reload"):
@@ -242,6 +245,39 @@ class Bot:
                     w *= 1.3  # always close
                 self.threats.append((s["bearing"], t - s.get("age", 0), w))
         self.threats = [th for th in self.threats if t - th[1] < 4.0][-30:]
+
+    def _remember_loot(self, obs):
+        """Pickups and cubes are listed only while seen. Remember them so a weapon or the cubes a kill dropped
+        are still worth walking to after the torso turns away; forget one when we should see it and do not."""
+        t = self.t
+        seen = set()
+        for kind_of, items in ((None, obs.get("pickups") or ()), ("cube", obs.get("cubes") or ())):
+            for it in items:
+                seen.add(it["id"])
+                self.loot_mem[it["id"]] = (kind_of or it["kind"], tuple(it["pos"]), t)
+        if not self.loot_mem:
+            return
+        x, y, z = self.pos
+        eye = (x, y, z + self.me["stats"].get("eye_height", 8.0))
+        near = self.cfg["vision"]["near_range"] * 0.8
+        checks = 0
+        for i, (kind, pos, ts) in list(self.loot_mem.items()):
+            if i in seen:
+                continue
+            if t - ts > 45.0:
+                del self.loot_mem[i]
+            elif checks < 6 and math.dist((x, y), pos[:2]) < near:
+                checks += 1
+                if self.nav is None or self.nav.los(eye, (pos[0], pos[1], pos[2] + 0.5)):
+                    del self.loot_mem[i]   # in plain view but not listed: someone took it
+
+    def _loot_known(self, cubes):
+        """Visible and remembered items of one class: (id, kind, pos, seen now)."""
+        out = []
+        for i, (kind, pos, ts) in self.loot_mem.items():
+            if (kind == "cube") == cubes:
+                out.append((i, kind, pos, ts == self.t))
+        return out
 
     def _pick_upgrade(self, offer):
         ids = [c["id"] for c in offer["choices"]]
@@ -444,8 +480,7 @@ class Bot:
             return None
         x, y, z = self.pos
         best = None
-        for c in obs.get("cubes") or []:
-            cp = c["pos"]
+        for _, _, cp, _ in self._loot_known(True):
             if abs(cp[2] - z) > 3.5 and abs(cp[2] - self._ground(cp)) > 1:
                 continue
             dd = math.dist((x, y), cp[:2])
@@ -1051,31 +1086,30 @@ class Bot:
         if hurt:
             return self._heal(obs, zone_goal)
 
-        # cubes
+        # cubes (seen now or remembered)
         best = None
-        for c in obs.get("cubes") or []:
-            cp = c["pos"]
+        for _, _, cp, now in self._loot_known(True):
             if abs(cp[2] - z) > 3.5 and abs(cp[2] - self._ground(cp)) > 1:
                 continue
             dd = math.dist((x, y), cp[:2])
-            if dd < 90 and ok(cp[:2]) and (best is None or dd < best[0]):
+            if dd < (90 if now else 120) and ok(cp[:2]) and (best is None or dd < best[0]):
                 best = (dd, cp)
         if best:
             return self._navigate(best[1][:2]), None, "cube"
 
-        # weapons worth taking
+        # weapons worth taking (seen now or remembered); with only the gun, a special is worth a long walk
         best = None
-        for p in obs.get("pickups") or []:
-            if p["id"] in self.bad_pickups and t - self.bad_pickups[p["id"]] < 20:
+        far = 220 if len(wk) == 1 else 160
+        for pid, kind, pp, now in self._loot_known(False):
+            if pid in self.bad_pickups and t - self.bad_pickups[pid] < 20:
                 continue
-            if not self._want_weapon(p["kind"], wk):
+            if not self._want_weapon(kind, wk):
                 continue
-            pp = p["pos"]
             if pp[2] - self._ground(pp) > 2.0 and pp[2] - z > 2.0:
                 if me["energy"] < 70:
                     continue  # on a roof: only when we can jet up
             dd = math.dist((x, y), pp[:2])
-            if dd < 110 and ok(pp[:2]) and (best is None or dd < best[0]):
+            if dd < (110 if now else far) and ok(pp[:2]) and (best is None or dd < best[0]):
                 best = (dd, pp)
         if best:
             dd, pp = best
