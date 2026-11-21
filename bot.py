@@ -20,7 +20,7 @@ DEBUG = bool(__import__('os').environ.get('BOTDEBUG'))
 
 WEAPON_VALUE = {"lightning": 3.0, "laser": 2.7, "mortar": 1.6, "gun": 0.0}
 UPGRADE_ORDER = [
-    "plating", "armor", "nanites", "gun_damage", "gun_rate", "lightning_efficiency", "laser_charge",
+    "plating", "nanites", "armor", "gun_damage", "gun_rate", "lightning_efficiency", "laser_charge",
     "laser_damage", "servos", "gyros", "gun_mag", "lightning_range", "sensors", "gun_velocity",
     "lightning_chain", "mortar_reload", "reactor", "capacitor", "jets", "mortar_velocity", "mortar_splash",
     "laser_pierce",
@@ -80,7 +80,6 @@ class Bot:
         self.scan_phase = self.rng.random() * TAU
         self.heavy_used = False
         self.last_heavy_t = -99.0
-        self.focus_id, self.focus_t = None, -99.0
         gc.collect()
         gc.freeze()
 
@@ -128,7 +127,9 @@ class Bot:
         aim_point = None   # world point to aim at (non-combat)
 
         # ---------------- movement decision
-        retreat = target is not None and self._should_retreat(target, enemies)
+        finishing = (fight and target["clear"] and self._enemy_health(target) <= 0.30 and target["d"] < 130
+                     and self.hp_frac > 0.30)
+        retreat = target is not None and not finishing and self._should_retreat(target, enemies)
         final_move = self._final_approach(obs["zone"], fight)
         if final_move is not None:
             move = final_move
@@ -142,7 +143,9 @@ class Bot:
         elif retreat and not (target["d"] < 38 or t - self.last_dmg_t < 0.6 and self.target_los):
             move, label = self._retreat(enemies, zone_goal, obs)
             boost = me["energy"] > 30 and t - self.last_dmg_t < 1.5
-        elif fight and self._outnumbered(enemies):
+        elif (grab := self._near_cube(obs, enemies, target, fight)) is not None:
+            move, label = grab
+        elif fight and not finishing and self._outnumbered(enemies):
             move, label = self._retreat(enemies, zone_goal, obs, fight_target=target)
             boost = me["energy"] > 45 and t - self.last_dmg_t < 1.0
         elif fight:
@@ -389,12 +392,10 @@ class Bot:
             score += 0.7 if not enemy["clear"] else 0.0
             score -= 1.1 if enemy["aggressor"] else 0.0
             score -= 0.25 if enemy["rear_angle"] > math.radians(self.mech["front_arc_deg"]) / 2 else 0.0
-            if enemy["id"] == self.focus_id and self.t - self.focus_t < 1.0:
-                score -= 0.8  # focus fire
+            if enemy["clear"] and self._enemy_health(enemy) <= 0.30:
+                score -= 1.2  # finish it: a kill is a placement and drops its cubes
             if score < best_score:
                 best, best_score = enemy, score
-        if best is not None:
-            self.focus_id, self.focus_t = best["id"], self.t
         return best
 
     def _should_fight(self, target, obs):
@@ -429,6 +430,26 @@ class Bot:
 
     def _outnumbered(self, enemies):
         return sum(e["d"] < 170 and (e["clear"] or e["aggressor"]) for e in enemies) >= 2
+
+    def _near_cube(self, obs, enemies, target, fight):
+        """A cube close by is worth more than a few shots: +4% HP and damage, and upgrade offers."""
+        if self.hp_frac <= 0.35 or sum(e["d"] < 240 for e in enemies) > 1:
+            return None
+        x, y, z = self.pos
+        best = None
+        for c in obs.get("cubes") or []:
+            cp = c["pos"]
+            if abs(cp[2] - z) > 3.5 and abs(cp[2] - self._ground(cp)) > 1:
+                continue
+            dd = math.dist((x, y), cp[:2])
+            if dd < 70 and (best is None or dd < best[0]):
+                best = (dd, cp)
+        if best is None:
+            return None
+        dd, cp = best
+        if dd < 10 or not fight or target is None or target["d"] > 60:
+            return self._navigate(cp[:2]), "grab cube"
+        return None
 
     def _enemy_health(self, actor):
         maximum = actor.get("max_hp", self.mech["hp"])
@@ -855,6 +876,27 @@ class Bot:
                 ax, ay = norm2(x - lx, y - ly) if dd > 0.5 else (math.cos(self.t), math.sin(self.t))
                 mx += ax * 2.0
                 my += ay * 2.0
+        for p in obs.get("projectiles") or []:
+            if p["kind"] not in ("gun", "npc"):
+                continue
+            px, py, pz = p["pos"]
+            vx, vy, vz = p["vel"]
+            vv = vx * vx + vy * vy + vz * vz
+            if vv < 1.0:
+                continue
+            cz = z + 4.5
+            tc = ((x - px) * vx + (y - py) * vy + (cz - pz) * vz) / vv
+            if not 0.02 <= tc <= 0.45:
+                continue
+            ox, oy, oz = px + vx * tc - x, py + vy * tc - y, pz + vz * tc - cz
+            if ox * ox + oy * oy + oz * oz > 3.8 * 3.8:
+                continue
+            nx_, ny_ = norm2(-vy, vx)  # across the round's path
+            side = -1.0 if nx_ * ox + ny_ * oy > 0 else 1.0
+            if abs(nx_ * ox + ny_ * oy) < 0.3:
+                side = float(self.strafe)
+            mx += nx_ * side
+            my += ny_ * side
         for e in obs["mechs"]:
             if e.get("charging") and e["kind"] == "mech":
                 ex, ey = e["pos"][0], e["pos"][1]
@@ -1123,7 +1165,7 @@ class Bot:
         return self.nav.ground_at(p[0], p[1])
 
     def _want_weapon(self, kind, wk):
-        if kind in wk or kind == "gun" or kind == "mortar":
+        if kind in wk or kind == "gun":
             return False
         if self.me["weapons"][1] is None or self.me["weapons"][0] is None:
             return True
