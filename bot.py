@@ -239,7 +239,8 @@ class Bot:
 
         # laser charge needs fire held across ticks; lightning/gun fire are one-shot holds
         act["fire"] = fire
-        self._reload(act, target)
+        if label != "opening crate":
+            self._reload(act, target)
 
         # ---------------- stuck / climbing
         jump, jet = self._unstick(move)
@@ -481,16 +482,6 @@ class Bot:
             enemy["rear_angle"] = facing_error
 
     def _choose_target(self, enemies):
-        if len(enemies) > 1 and not self.ffa:
-            weapon_range = max((weapon["stats"]["range"] for weapon in self.me["weapons"] if weapon),
-                               default=0.0)
-            reach = min(weapon_range, self.W["laser"]["range"])
-            recent = self.t - self.me["stats"]["regen_delay"]
-            shooters = [enemy for enemy in enemies
-                        if enemy["clear"] and self.attackers.get(enemy["id"], -math.inf) > recent
-                        and math.dist(self.pos, enemy["pos"]) < reach]
-            if shooters:
-                enemies = shooters
         best, best_score = None, math.inf
         for enemy in enemies:
             if enemy["d"] > self.W["laser"]["range"]:
@@ -1194,6 +1185,51 @@ class Bot:
             return self._clamp(vx, vy), "capturing under fire"
         return (0.0, 0.0), "capturing"
 
+    def _opening_crate(self, obs, gun):
+        stats = self.me["stats"]
+        if (self.ffa or self.me["cubes"] or self.nav is None or gun is None or gun["reload"] > 0
+                or self.t >= 0.5 * self.cfg["zone"]["phases"][0]["hold_s"]
+                or self.t - self.last_dmg_t < stats["regen_delay"]):
+            return None
+        x, y, z = self.pos
+        near = self.cfg["vision"]["near_range"]
+        if any(actor["kind"] == "mech" and math.dist(actor["pos"][:2], (x, y)) < near
+               for actor in obs["mechs"]):
+            return None
+
+        crate = self.cfg["crates"]
+        speed = stats["walk_speed"]
+        weapon = gun["stats"]
+        reach = self.cfg["cubes"]["pickup_radius"]
+        origin = (x, y, z + self.muzzle)
+        best = None
+        for item in obs.get("crates") or ():
+            cx, cy, cz = item["pos"]
+            distance = math.hypot(cx - x, cy - y)
+            if distance > min(near, 4.0 * speed) or math.dist(origin, item["pos"]) >= weapon["range"]:
+                continue
+            shots = math.ceil(item.get("hp", crate["hp"]) / weapon["damage"])
+            if not 0 < shots <= gun["ammo"] or abs(cz - self.nav.ground_at(cx, cy)) > stats["step_up"]:
+                continue
+            point = (cx, cy, cz + crate["height"] / 2)
+            if not self.nav.los(origin, point) or not self.nav.walk_clear((x, y), (cx, cy)):
+                continue
+            slew = abs(wrap(math.atan2(cy - y, cx - x) - self.me["aim"][0])) / stats["turn_rate"]
+            travel = max(0.0, distance - reach) / speed
+            finish = max(travel, max(slew, gun["cooldown"]) + (shots - 1) * weapon["cooldown"])
+            if not self._in_zone_later(obs, (cx, cy), finish + self.decision_span):
+                continue
+            if best is None or finish < best[0]:
+                best = finish, distance, point
+
+        if best is None:
+            return None
+        _, distance, point = best
+        pace = min(1.0, max(0.0, distance - 0.8 * reach) / (speed * self.decision_span))
+        mx, my = norm2(point[0] - x, point[1] - y)
+        self.farm_kind = "crate"
+        return (mx * pace, my * pace), point, "opening crate"
+
     def _peaceful(self, obs, npcs, zone_goal):
         x, y, z = self.pos
         t = self.t
@@ -1216,6 +1252,9 @@ class Bot:
                 best = (dd, cp)
         if best:
             return self._navigate(best[1][:2]), None, "cube"
+
+        if (opening := self._opening_crate(obs, wk.get("gun", (None, None))[1])) is not None:
+            return opening
 
         # weapons worth taking (seen now or remembered); with only the gun, a special is worth a long walk
         best = None
