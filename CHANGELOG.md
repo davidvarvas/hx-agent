@@ -9,3 +9,4 @@ Short log of versions. Every version keeps its commit in history.
 | C12 | `041e1b9` | retreat discipline, upgrade order, focus fire |
 | D1 | `7e86f21` | weapon preference, loot memory |
 | D1 (tidy) | later commits | same play as D1; docs and file names only |
+| D2 | see git log | D1 + boost-strafing while a mech with a clear shot engages us |

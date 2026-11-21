@@ -83,6 +83,7 @@ class Bot:
         self.ret_latch = False
         self.focus_id, self.focus_t = None, -99.0
         self.loot_mem = {}         # id -> (kind, pos, last seen): weapons and cubes we saw
+        self.evade = False         # boost-strafing in a duel (energy hysteresis)
         gc.collect()
         gc.freeze()
 
@@ -154,7 +155,7 @@ class Bot:
             boost = me["energy"] > 45 and t - self.last_dmg_t < 1.0
         elif fight:
             move = self._fight_move(target, enemies, zone_goal, obs)
-            boost = me["energy"] > 45 and t - self.last_dmg_t < 1.0
+            boost = self._evade_boost(target)
             label = f"fight {target['id']}"
         else:
             move, aim_point, label = self._peaceful(obs, npcs, zone_goal)
@@ -757,6 +758,16 @@ class Bot:
             wx, wy = self.path[0]
             return norm2(wx - x, wy - y)
         return norm2(gx - x, gy - y)
+
+    def _evade_boost(self, target):
+        """Boost-strafe while a mech can shoot at us: a faster mech is harder to hit. A gun and laser use no
+        energy, so spend it down to a small reserve; with lightning, keep the energy for its shots."""
+        energy = self.me["energy"]
+        if "lightning" in self._weapons():
+            return energy > 45 and self.t - self.last_dmg_t < 1.0
+        self.evade = energy > 20 if self.evade else energy > 45
+        threatened = self.t - self.last_dmg_t < 1.5 or (target["clear"] and target["aggressor"])
+        return self.evade and threatened
 
     def _heavy_ok(self):
         return not self.heavy_used and (time.perf_counter() - self.t0) < self.search_budget
