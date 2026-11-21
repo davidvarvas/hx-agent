@@ -18,9 +18,9 @@ except Exception:  # numpy missing: run without a map
 TAU = 2 * math.pi
 DEBUG = bool(__import__('os').environ.get('BOTDEBUG'))
 
-WEAPON_VALUE = {"lightning": 3.0, "laser": 2.7, "mortar": 1.6, "gun": 0.0}
+WEAPON_VALUE = {"lightning": 3.0, "laser": 3.0, "gun": 1.0, "mortar": -1.0}
 UPGRADE_ORDER = [
-    "plating", "armor", "nanites", "gun_damage", "gun_rate", "lightning_efficiency", "laser_charge",
+    "plating", "nanites", "armor", "gun_damage", "gun_rate", "lightning_efficiency", "laser_charge",
     "laser_damage", "servos", "gyros", "gun_mag", "lightning_range", "sensors", "gun_velocity",
     "lightning_chain", "mortar_reload", "reactor", "capacitor", "jets", "mortar_velocity", "mortar_splash",
     "laser_pierce",
@@ -80,7 +80,6 @@ class Bot:
         self.scan_phase = self.rng.random() * TAU
         self.heavy_used = False
         self.last_heavy_t = -99.0
-        self.focus_id, self.focus_t = None, -99.0
         gc.collect()
         gc.freeze()
 
@@ -395,12 +394,8 @@ class Bot:
             score -= 0.25 if enemy["rear_angle"] > math.radians(self.mech["front_arc_deg"]) / 2 else 0.0
             if enemy["clear"] and self._enemy_health(enemy) <= 0.30:
                 score -= 1.2  # finish it: a kill is a placement and drops its cubes
-            if enemy["id"] == self.focus_id and self.t - self.focus_t < 1.0:
-                score -= 0.8  # focus fire: damage spread over several mechs just regenerates
             if score < best_score:
                 best, best_score = enemy, score
-        if best is not None:
-            self.focus_id, self.focus_t = best["id"], self.t
         return best
 
     def _should_fight(self, target, obs):
@@ -1170,16 +1165,13 @@ class Bot:
         return self.nav.ground_at(p[0], p[1])
 
     def _want_weapon(self, kind, wk):
-        if kind in wk or kind == "gun" or kind == "mortar":
+        """Laser and lightning are wanted; a mortar never (a laser hit on its carrier does +60%). With both
+        slots full, the gun (or a mortar) makes room for the missing special."""
+        if kind in wk or kind in ("gun", "mortar"):
             return False
         if self.me["weapons"][1] is None or self.me["weapons"][0] is None:
             return True
-        # both full: swap the worse special for a better one
-        specials = [k for k in wk if k != "gun"]
-        if not specials:
-            return False
-        worst = min(specials, key=lambda k: WEAPON_VALUE.get(k, 0))
-        return WEAPON_VALUE.get(kind, 0) > WEAPON_VALUE.get(worst, 0) + 0.25
+        return "gun" in wk or "mortar" in wk
 
     def _take(self, obs):
         x, y, z = self.pos
@@ -1193,11 +1185,10 @@ class Bot:
                 continue
             out = {"take": p["id"]}
             if me["weapons"][0] is not None and me["weapons"][1] is not None:
-                specials = [(k, i) for k, (i, w) in wk.items() if k != "gun"]
-                k, i = min(specials, key=lambda s: WEAPON_VALUE.get(s[0], 0))
-                w = me["weapons"][i]
-                if w.get("kind") == "laser" and (w.get("charge") or 0) > 0:
-                    continue
+                k, i = min(((k, i) for k, (i, w) in wk.items()), key=lambda s: WEAPON_VALUE.get(s[0], 0))
+                lz = wk.get("laser")
+                if lz and (lz[1].get("charge") or 0) > 0:
+                    continue  # cannot swap while the laser is charging
                 out["drop"] = i
             return out
         return None
