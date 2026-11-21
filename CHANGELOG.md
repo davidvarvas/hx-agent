@@ -4,10 +4,26 @@
 **Practice** = the real practice server (48 matches), which is ground truth.
 "Seeds 200–295" means two 48-match batches: `SEED0=200` and `SEED0=248`.
 
+## Calibration against real practice scores (sim D, 96 matches each)
+| Bot | Sim | Real practice |
+| --- | ---: | ---: |
+| Kit example bot | 1.33 | 1.15 |
+| `mech-royale-bot-gpt` `89ec1cd` | 6.27 | 4.08 |
+| `mech-royale-bot-gpt` `0003b87` | 6.11 | 3.79 |
+| this repo `86aaa4e` (v5) | 6.06 | predicted ≈ 3.9 |
+
+- **Fit:** real ≈ 0.38 + 0.57 × sim. At this level the sim is about 1.6 times too optimistic: the real house bots are tougher.
+- **Precision:** one 96-match batch can't separate differences smaller than about 0.5 sim points (≈ 0.3 real).
+- **Free-for-all sim** (48 matches, expert house bots): GPT 12.0 vs this repo 12.12, a tie.
+- **Tried and dropped (merge):** porting this repo's additions onto the GPT bot (`89ec1cd`). The additions were the watchdog, weapon-first with weapon memory, free-for-all detection with third-party kills, and juking.
+  - Result: 5.66 (−0.61 ± 0.43 vs the GPT bot alone).
+  - Also fighting only aggressors in practice: 5.60 (−0.67 ± 0.50).
+
 ## v5: free-for-all detection, third-party kills
 - **Detection:** practice house bots never kill each other, so deaths the bot didn't cause (`mechs − alive − own kills`; one before 150 s, or two after) mean a free-for-all. It's then latched for the match; in one test it was detected at 12.6 s.
 - **Third-party (free-for-all only):** join in on a non-hostile mech below 45% HP that lost HP to someone else in the last 4 s, within 120 m, while the bot is above 50% HP with at most one hostile on it.
 - **Sim D** (sim B plus the real 130 m spawn spacing instead of 90 m; seeds 200–295): v4 practice 6.07 and free-for-all 12.00.
+  - v1 (`30154ab`) on sim D: 4.14, so v1 → v5 is **+1.93 ± 0.48** (61 matches better, 28 worse).
 - **v5 results:**
   - Practice: 6.06 (−0.01 ± 0.08; 89 of 96 matches identical, so it's off as intended).
   - Free-for-all: 12.12 (+0.12 ± 0.23). Docker check: PASS.
