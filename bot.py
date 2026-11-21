@@ -886,99 +886,6 @@ class Bot:
                 return math.cos(a) * mag, math.sin(a) * mag
         return mx, my
 
-    def _pref_range(self, tgt, wk, their, enemies):
-        """Preferred distance to the target, by loadout. The practice squad's guns lose accuracy with
-        range while a laser is hitscan, so hold a laser duel further out; close in on a hurt target
-        that would otherwise break away or heal."""
-        if self.ffa:  # free-for-all keeps the previous close-range brawling
-            if "lightning" in wk and self.me["energy"] > 25:
-                want = 26.0
-            elif "lightning" in their:
-                want = 75.0
-            elif "laser" in wk and "gun" not in wk:
-                want = 110.0
-            else:
-                want = CAND_RANGE if CAND_RANGE > 0 and "laser" in wk else 60.0
-            if self._enemy_health(tgt) < 0.25 and self.hp_frac > 0.4:
-                want *= 0.7
-            return want
-        if "lightning" in wk and self.me["energy"] > 25:
-            want = 28.0
-        elif "lightning" in their:
-            want = 80.0
-        elif "laser" in wk:
-            want = 120.0 if "gun" in wk else 135.0
-        elif "laser" in their:
-            want = 105.0
-        else:
-            want = 85.0
-        if "lightning" not in wk:
-            if "lightning" in their:
-                want = max(want, 64.0)
-            if "mortar" in their:
-                want = max(want, 80.0)
-        hpf_t = self._enemy_health(tgt)
-        if hpf_t < 0.38 and self.hp_frac > 0.42 and sum(1 for e in enemies if e["d"] < 170) <= 2:
-            want = 20.0
-        elif hpf_t < 0.25 and self.hp_frac > 0.4:
-            want *= 0.7
-        return want
-
-    def _duel_move(self, tgt, enemies, obs, wk, their):
-        """Sample nearby directions and pick the one that keeps the preferred fighting range and line of
-        fire, moves along the current strafe side, and shows us to as few other mechs as possible."""
-        import numpy as np
-        n = self.nav
-        x, y, z = self.pos
-        t = self.t
-        want = self._pref_range(tgt, wk, their, enemies)
-        if t > self.strafe_until:
-            if self.rng.random() < 0.6:
-                self.strafe = -self.strafe
-            self.strafe_until = t + 0.3 + self.rng.random() * 0.7
-        ux, uy = norm2(tgt["pos"][0] - x, tgt["pos"][1] - y)
-        sx, sy = -uy * self.strafe, ux * self.strafe
-        tx, ty, tz = tgt["pos"]
-        target_pt = (tx, ty, tz + self.mech["height"] * self._size(tgt) * 0.5)
-        mz = self.muzzle
-        cands = [(x, y, 0.0, 0.0, z)]
-        for k in range(16):
-            a = k * TAU / 16
-            cx, cy = x + math.cos(a) * 6.0, y + math.sin(a) * 6.0
-            if not n.is_free(cx, cy) or not n.walk_clear((x, y), (cx, cy)):
-                continue
-            cands.append((cx, cy, math.cos(a), math.sin(a), n.ground_at(cx, cy)))
-        if len(cands) < 3:
-            return None
-        A = np.array([(c[0], c[1], c[4] + mz) for c in cands], np.float32)
-        B = np.array([target_pt] * len(cands), np.float32)
-        los_t = n.los_many(A, B)
-        foes = [e for e in enemies if e is not tgt and e["d"] < 170][:4]
-        expo = np.zeros(len(cands), np.int32)
-        if foes:
-            E = np.array([(e["pos"][0], e["pos"][1], e["pos"][2] + mz * self._size(e)) for e in foes], np.float32)
-            Bob = np.array([(c[0], c[1], c[4] + self.mech["height"] * 0.6) for c in cands], np.float32)
-            AA = np.repeat(E[None, :, :], len(cands), axis=0).reshape(-1, 3)
-            BB = np.repeat(Bob[:, None, :], len(foes), axis=1).reshape(-1, 3)
-            vis = n.los_many(AA, BB, step=2.4)
-            expo = vis.reshape(len(cands), len(foes)).sum(1)
-        zc, zr = self._zone_circle_at(obs["zone"], t + 2.0)
-        best_s, best = None, None
-        for i, (cx, cy, dx, dy, cz) in enumerate(cands):
-            dist = max(1.0, math.hypot(tx - cx, ty - cy))
-            s = -1.1 * abs(dist - want)
-            if los_t[i]:
-                s += 30.0
-            s -= 25.0 * float(expo[i])
-            s += 9.0 * (dx * sx + dy * sy)
-            if math.hypot(cx - zc[0], cy - zc[1]) > zr - 12:
-                s -= 60.0
-            if best_s is None or s > best_s:
-                best_s, best = s, (dx, dy)
-        if best is None or (best[0] == 0.0 and best[1] == 0.0):
-            return None
-        return self._clamp(best[0], best[1])
-
     def _fight_move(self, tgt, enemies, zone_goal, obs):
         x, y = self.pos[0], self.pos[1]
         t = self.t
@@ -986,11 +893,20 @@ class Bot:
         ex, ey = tgt["pos"][0], tgt["pos"][1]
         d = tgt["d"]
         their = tgt.get("weapons") or []
-        if self.nav is not None and not self.ffa:
-            duel = self._duel_move(tgt, enemies, obs, wk, their)
-            if duel is not None:
-                return duel
-        want = self._pref_range(tgt, wk, their, enemies)
+        if "lightning" in wk and self.me["energy"] > 25:
+            want = 26.0
+        elif "lightning" in their:
+            want = 75.0
+        elif "laser" in wk and "gun" not in wk:
+            want = 110.0
+        else:
+            want = CAND_RANGE if CAND_RANGE > 0 and "laser" in wk else 60.0
+        hpf_t = self._enemy_health(tgt)
+        if not self.ffa and hpf_t < 0.38 and self.hp_frac > 0.42 \
+                and sum(1 for e in enemies if e["d"] < 170) <= 2:
+            want = 20.0  # finish a badly hurt target before it can heal or break away
+        elif hpf_t < 0.25 and self.hp_frac > 0.4:
+            want *= 0.7
         ux, uy = norm2(ex - x, ey - y)
         radial = max(-1.0, min(1.0, (d - want) / max(15.0, want * 0.5)))
         if t > self.strafe_until:
@@ -1345,7 +1261,7 @@ class Bot:
 
         # weapons worth taking (seen now or remembered); with only the gun, a special is worth a long walk
         best = None
-        far = (300 if len(wk) == 1 else 180) if not self.ffa else (220 if len(wk) == 1 else 160)
+        far = 220 if len(wk) == 1 else 160
         for pid, kind, pp, now in self._loot_known(False):
             if pid in self.bad_pickups and t - self.bad_pickups[pid] < 20:
                 continue
@@ -1355,8 +1271,7 @@ class Bot:
                 if me["energy"] < 70:
                     continue  # on a roof: only when we can jet up
             dd = math.dist((x, y), pp[:2])
-            if dd < ((140 if now else far) if not self.ffa else (110 if now else far)) and ok(pp[:2]) \
-                    and (best is None or dd < best[0]):
+            if dd < (110 if now else far) and ok(pp[:2]) and (best is None or dd < best[0]):
                 best = (dd, pp)
         if best:
             dd, pp = best
@@ -1375,7 +1290,7 @@ class Bot:
         for c in ([] if quiet else obs.get("crates") or []):
             cp = c["pos"]
             dd = math.dist((x, y), cp[:2])
-            if dd < (150 if not self.ffa else 70) and ok(cp[:2]) and (best is None or dd < best[0]):
+            if dd < 70 and ok(cp[:2]) and (best is None or dd < best[0]):
                 best = (dd, cp)
         if CAND_CRATE and not quiet and best is None and self.hp_frac > 0.7 and \
                 not any(t - ts < 10 for _, ts in self.last_seen.values()):
