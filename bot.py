@@ -56,6 +56,13 @@ class Bot:
         self.mech = cfg["mech"]
         self.W = cfg["weapons"]
         self.cube_growth = cfg["cubes"]["size_per_cube"]
+        armor = self.mech["armor"]
+        for upgrade in cfg["upgrades"]:
+            for effect in upgrade["effects"]:
+                if effect["path"] == "mech.armor":
+                    for _ in range(upgrade["max"]):
+                        armor = max(armor, armor * effect.get("mul", 1) + effect.get("add", 0))
+        self.laser_damage_floor = max(0.0, 1 - armor)
         self.sim_step = 1 / cfg["match"]["tick_hz"]
         self.decision_span = self.sim_step * cfg["match"]["decide_every"]
         self.search_budget = min(0.012, cfg["bot"]["tick_budget_ms"] * 0.00024)
@@ -114,6 +121,7 @@ class Bot:
         self.mortar_sol = None
         self.gun_solution = None
         self.direct_aim = None
+        self.laser_lethal = False
         self.want_jump = False
         self.farm_kind = None
         t = self.t = obs["t"]
@@ -151,6 +159,8 @@ class Bot:
         zone_goal, zone_urgent = self._zone_goal(obs)
         self._measure_threats(enemies)
         target = self._choose_target(enemies)
+        if target is not None and not self.ffa and not target["clear"] and self.nav is not None:
+            self._aim_at_exposed_height(target)
         self.target_los = target is not None and target["clear"]
         fight = target is not None and self._should_fight(target, obs)
 
@@ -561,6 +571,19 @@ class Bot:
         return self.nav.los((x, y, z + self.muzzle), (ex, ey, center))
 
     # ================================================================== aiming
+    def _aim_at_exposed_height(self, target):
+        x, y, z = self.pos
+        ex, ey, ez = target["pos"]
+        height = self.mech["height"] * self._size(target)
+        origin = (x, y, z + self.muzzle)
+        heights = (0.78, 0.22)
+        points = [(ex, ey, ez + fraction * height) for fraction in heights]
+        for fraction, clear in zip(heights, self.nav.los_many([origin] * len(points), points)):
+            if clear:
+                target["aim_height"] = fraction
+                target["clear"] = True
+                break
+
     def _lead_aim(self, e):
         weapons = self._weapons()
         _, gun = weapons.get("gun", (None, None))
@@ -569,13 +592,24 @@ class Bot:
         if not self.target_los and mortar:
             return self._mortar_aim(e, mortar)
 
-        self.direct_aim, _, _ = self._intercept(e, self.sim_step)
+        self.direct_aim, origin, point = self._intercept(e, self.sim_step)
+        self.direct_line = origin, point
         self.gun_solution = None
         if gun and gun.get("ammo", 0) and not gun.get("reload", 0):
             delay = self._launch_delay(gun)
             self.gun_solution = self._intercept(e, delay, gun["stats"]["speed"])
-        if laser and laser.get("charge", 0) >= laser["stats"]["charge"] - self.decision_span:
-            return self.direct_aim
+        if laser:
+            stats = laser["stats"]
+            charge = laser.get("charge", 0) or 0
+            hp = e.get("hp")
+            if not self.ffa and self.target_los and hp is not None and charge >= stats["min_charge"]:
+                cubes = self.cfg["cubes"]
+                cube_bonus = 1 + cubes["damage_per_cube"] * min(self.me["cubes"], cubes["stat_cap"])
+                fraction = min(1.0, charge / stats["charge"])
+                damage = stats["damage"] * (stats["min_frac"] + (1 - stats["min_frac"]) * fraction)
+                self.laser_lethal = hp <= 0.95 * damage * cube_bonus * self.laser_damage_floor
+            if self.laser_lethal or charge >= stats["charge"] - self.decision_span:
+                return self.direct_aim
         return self.gun_solution[0] if self.gun_solution else self.direct_aim
 
     def _launch_delay(self, weapon):
@@ -589,7 +623,7 @@ class Bot:
         ex, ey, ez = enemy["pos"]
         evx, evy, evz = enemy["vel"]
         scale = self._size(enemy)
-        ez += self.mech["height"] * scale / 2
+        ez += self.mech["height"] * scale * enemy.get("aim_height", 0.5)
         airborne = abs(evz) > 0.05
         gravity = self.mech["gravity"] if airborne else 0
         muzzle_offset = self.me["stats"]["radius"] + 0.5
@@ -680,7 +714,9 @@ class Bot:
         rad = self.mech["radius"] * sc
         eyaw, epitch = self._aim_err(aim)
         tol = math.atan2(rad * 0.8, max(1.0, d3))
-        ptol = math.atan2(self.mech["height"] * sc * 0.42, max(1.0, d3))
+        aim_height = e.get("aim_height", 0.5)
+        vertical_room = min(0.42, 0.85 * min(aim_height, 1 - aim_height))
+        ptol = math.atan2(self.mech["height"] * sc * vertical_room, max(1.0, d3))
         los = self.target_los
         for i, w in enumerate(me["weapons"]):
             if not w:
@@ -714,10 +750,12 @@ class Bot:
                               for o in enemies)
                 if charge > 0:
                     # holding: release when aimed (beam is hitscan) or keep holding
-                    ready = charge >= full * 0.97
+                    ready = self.laser_lethal or charge >= full * 0.97
                     yaw, pitch = self._aim_at_launch(aim, self.sim_step)
                     on = (los and self.direct_aim is not None and d3 <= s["range"] and abs(wrap(yaw - self.direct_aim[0])) < tol
                           and abs(pitch - self.direct_aim[1]) < ptol)
+                    if ready and on and (self.laser_lethal or aim_height != 0.5) and self.nav is not None:
+                        on = self.nav.los(*self.direct_line)
                     fire[i] = not (ready and on) and charge < full + s["hold_s"] - 0.15
                     if not los and charge >= full:
                         fire[i] = True  # keep it charged while target is behind cover
