@@ -37,6 +37,9 @@ DEFEND = int(os.environ.get("DEFEND", "1"))
 FFA = int(os.environ.get("FFA", "0"))
 # ARMED=1 (default): house bots loot weapons and use lasers and lightning, as the real house bots do.
 ARMED = int(os.environ.get("ARMED", "1"))
+# MORTARS=1 (default): mortars are among the weapon pickups (loot.weights). Nobody fires them in this sim, but a
+# mech carrying one takes +60% from lasers (cook-off), as in the rules.
+MORTARS = int(os.environ.get("MORTARS", "1"))
 KIT = os.environ.get("MF_KIT", os.path.join(os.path.dirname(os.path.dirname(HERE)), "mechfight-kit"))
 TAU = 2 * math.pi
 
@@ -109,7 +112,7 @@ class Sim:
         self.urng = random.Random(seed * 7919 + 17)  # upgrade offers: separate stream, same world per seed
         hello = json.loads(__import__("gzip").open(os.path.join(KIT, "check/stream.jsonl.gz"), "rt").readline())
         self.cfg = hello["config"]
-        self.nav = nav.NavMap(os.path.join(KIT, "arena"))
+        self.nav = nav.NavMap(os.path.join(KIT, "arena"), self.cfg["mech"])
         self.dt = 1.0 / self.cfg["match"]["tick_hz"]
         self.tick = 0
         self.t = 0.0
@@ -146,7 +149,7 @@ class Sim:
             self.crates.append({"id": self._nid(1000), "pos": [p[0], p[1], n.ground_at(*p)], "hp": 300})
         for _ in range(self.cfg["loot"]["floor_count"]):
             p = self._rand_free()
-            self.pickups.append({"id": self._nid(8000), "kind": self.rng.choice(["laser", "lightning"]), "pos": [p[0], p[1], n.ground_at(*p)]})
+            self.pickups.append({"id": self._nid(8000), "kind": self._loot_kind(), "pos": [p[0], p[1], n.ground_at(*p)]})
         self.sounds = {i: [] for i in range(16)}
         self.beams = []
         self.zone_phase = 0
@@ -170,6 +173,17 @@ class Sim:
         self.late = 0
         self.bot_ms = 0
         self.last_action = {}
+
+    def _loot_kind(self):
+        w = {k: v for k, v in self.cfg["loot"]["weights"].items() if v > 0 and k in self.cfg["weapons"]}
+        if not MORTARS:
+            w.pop("mortar", None)
+        r = self.rng.random() * sum(w.values())
+        for k, v in w.items():
+            r -= v
+            if r <= 0:
+                return k
+        return next(iter(w))
 
     def _nid(self, base):
         self.next_id += 1
@@ -581,6 +595,8 @@ class Sim:
             rear = abs(wrap(b - obj.aim[0])) > math.pi / 2
             if rear:
                 dmg *= 1.5
+            if weapon == "laser" and any(w and w["kind"] == "mortar" for w in obj.weapons):
+                dmg *= 1.0 + self.cfg["weapons"]["laser"].get("cookoff", 0.6)  # cook-off
             dmg *= max(0.0, 1.0 - obj.mc.get("armor", 0.0))  # armor: weapon damage only (zone damage is applied elsewhere)
             if src is not None and src.id == self.me_id:
                 self.st["dealt"] += dmg
@@ -611,7 +627,7 @@ class Sim:
                 self.crates.remove(obj)
                 self.cubes.append({"id": self._nid(5000), "pos": obj["pos"][:]})
                 if self.rng.random() < 0.5:
-                    self.pickups.append({"id": self._nid(8000), "kind": self.rng.choice(["laser", "lightning"]), "pos": obj["pos"][:]})
+                    self.pickups.append({"id": self._nid(8000), "kind": self._loot_kind(), "pos": obj["pos"][:]})
 
     def _kill(self, m, src):
         m.alive = False

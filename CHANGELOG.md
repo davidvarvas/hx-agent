@@ -4,6 +4,47 @@
 **Practice** = the real practice server (48 matches), which is ground truth.
 "Seeds 200–295" means two 48-match batches: `SEED0=200` and `SEED0=248`.
 
+## v7 (L1): new decision core on the GPT bot
+- **Base:** `davidvarvas/mech-royale-bot-gpt` `89ec1cd` (4.08 real), the team's best scored bot. Its aiming, supply-drop, combat-loot and final-centre code are kept.
+- **Sources:** my own implementation of design principles learned by reading public entries; no code was copied:
+  - `LanceHuang245/mech-royale` (MIT; 4.75 real): README and code read for structure
+  - `nullat0m7/mech-royale`: changelog
+  - BingBU: README
+- **Situation:** incoming damage per second (last 2.5 s); hits from attackers out of sight; threats in view within 240 m; a retreat latch (below 38% HP until 80%, or 60% after 12 s without damage).
+- **Mode order:**
+  1. final centre
+  2. zone edge
+  3. cover when retreating, outnumbered (3+ threats, 2+ under 60% HP, more than 110 damage per second, or an unseen attacker) or out-ranged by a laser, unless the fight is close or a kill is near
+  4. zone rotation
+  5. supply drop
+  6. fight any target with a clear shot
+  7. farm and roam
+  - The bot keeps firing while it repositions.
+- **Targeting:** distance + 0.2 × HP, −100 under 30% HP, +400 without a clear shot, −120 for the current target, −40 for whoever just hit us.
+- **Cover:** 16 rays out to 75 m (stopping at walls); score = 100 × threats that can see the spot + 0.8 × distance − 12 × (alignment with "away from the threats"). A fully hidden spot is held.
+- **Combat range:**
+  - laser 110 m
+  - lightning 28 m
+  - gun only 85 m
+  - laser and lightning: 28 m when the target is closer than 60 m
+  - finishing: 28 m (55 m without lightning)
+  - It strafes in longer runs.
+- **Other changes:**
+  - it turns to face unseen attackers
+  - it dodges bullets that are about to hit
+  - loadout is laser plus lightning (the gun is dropped for the second), never a mortar
+  - upgrades: plating, armor, nanites first
+  - it shoots crates out to 150 m and returns to crates it saw earlier
+  - it boosts to far loot when no mech is within 80 m
+  - farming has a stall watchdog
+- **Sim F** (armed house bots, mortar pickups, upgrades, drops; 96 matches): GPT `89ec1cd` 3.77 → **5.31 (+1.54 ± 0.49)**.
+  - Alive at the end in 12 of 96 matches (was 2); 4.6 kills (was 3.2).
+  - Weakness: 31 of 96 die in the first minute; it fights anything it sees before it is armed.
+- **Also tried on sim F:**
+  - g1 (no mortars, plating/armor/nanites order, focus fire): 3.84 (+0.07)
+  - g2 (g1 plus crate farming to 160 m in the first 2 minutes): 3.78, only +0.2 cubes
+- **Sim F** adds mortar pickups (`loot.weights`) and the laser cook-off (+60% to a mech carrying a mortar). Practice: pending.
+
 ## Real result and sim E (armed house bots)
 - **Practice for `86aaa4e`: 3.60.** That's below the prediction (3.9) and below the GPT bot's best (4.08). The GPT bot's four practice runs averaged 3.92 (3.79–4.08), so one run's noise is about ±0.3.
 - **Sim E (`ARMED=1`, now the default):** house bots pick up weapons and use lasers and lightning, as the real ones did in live matches. Calibration, 96 matches each:
