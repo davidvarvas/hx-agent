@@ -4,13 +4,20 @@
 **Practice** = the real practice server (48 matches), which is ground truth.
 "Seeds 200–295" means two 48-match batches: `SEED0=200` and `SEED0=248`.
 
+## Own-code: stacking on A2 (4.23, our best own-code score)
+| Candidate | Change on top of A2 | Practice |
+| --- | --- | --- |
+| C1 | A3's retreat discipline | pending |
+| C2 | A1's no mortar, plating → armor → nanites, and focus fire | pending |
+| C3 | A4's laser + lightning loadout, never a mortar | pending |
+
 ## Own-code experiments: one idea per submission on `89ec1cd` (4.08)
 Each is our GPT bot `89ec1cd` plus one idea taken from public write-ups (no code), judged only by the real practice score.
 
 | Candidate | Commit | Change | Practice |
 | --- | --- | --- | --- |
 | A1 | `6482379` | never carry a mortar; plating → armor → nanites; focus fire | pending |
-| A2 | `94acb5d` | finish off clear targets under 30% HP; grab cubes within 70 m before fighting; dodge gun rounds | pending |
+| A2 | `94acb5d` | finish off clear targets under 30% HP; grab cubes within 70 m before fighting; dodge gun rounds | **4.23** (+0.15) |
 | A3 | see git log | retreat discipline: hide below 38% HP until 80% (or 60% after 12 s untouched); cover when 3+ enemies (2+ under 60% HP) have a clear shot | pending |
 | A4 | see git log | laser + lightning loadout (the gun makes room for the second special); never a mortar | pending |
 
