@@ -4,7 +4,15 @@
 **Practice** = the real practice server (48 matches), which is ground truth.
 "Seeds 200–295" means two 48-match batches: `SEED0=200` and `SEED0=248`.
 
-## B2: `jink` on, free-for-all switches off
+## Back to our own code (withdrawing B0–B2)
+- **The rule** (quoted from the buildathon's Blast Radius track page): "One team a person, and your own team's repository. No sharing code between teams: top entries are compared, and you may be asked to explain yours."
+- **Withdrawn:** B0, B1 and B2 were built on another team's (MIT-licensed, credited) bot, so they don't meet this rule.
+  - Their commits stay in history, because submitted commits must remain public.
+  - They are no longer used, and they must not be the final entry.
+- **The repo's latest commit is our own code again:** A2 (`94acb5d`) = our team's GPT bot `89ec1cd` plus our own changes (finish-off, cube grab, bullet dodging).
+- **From here on:** ideas from public write-ups are fine; other teams' code is not.
+
+## B2: `jink` on, free-for-all switches off (withdrawn)
 - **Real practice:** B0 4.75 and B1 4.75, as expected; the team is 10th of 114.
 - **Free-for-all league:** the original author's 16-bot free-for-all simulator (`tools/league.py` in his MIT repo), run locally. It compares versions inside the same matches.
   - 120 matches per comparison, noise ±0.22. Two A/A checks (identical bots) gave −0.09 and −0.17.
