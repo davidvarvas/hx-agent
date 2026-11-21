@@ -80,6 +80,7 @@ class Bot:
         self.last_hit_t = -99.0
         self.strafe = 1
         self.strafe_until = 0.0
+        self.duel_strafe_until = -math.inf
         self.path = None
         self.path_goal = None
         self.path_t = -99.0
@@ -905,7 +906,11 @@ class Bot:
             want *= 0.7
         ux, uy = norm2(ex - x, ey - y)
         radial = max(-1.0, min(1.0, (d - want) / max(15.0, want * 0.5)))
-        if t > self.strafe_until:
+        if not self.ffa and self.target_los and not self._outnumbered(enemies):
+            if t >= self.duel_strafe_until:
+                self.strafe = -self.strafe
+                self.duel_strafe_until = t + self.rng.uniform(3.0, 5.0)
+        elif t > self.strafe_until:
             if self.rng.random() < 0.55:
                 self.strafe = -self.strafe
             self.strafe_until = t + 0.45 + self.rng.random() * 0.9
