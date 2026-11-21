@@ -17,6 +17,17 @@ except Exception:  # numpy missing: run without a map
 
 TAU = 2 * math.pi
 DEBUG = bool(__import__('os').environ.get('BOTDEBUG'))
+# Free-for-all behaviour (active only after the free-for-all detector fires)
+CAND_FACE = True       # glance at an unseen mech that hits our back
+FFA_ENGAGE = "select"  # open fire only on hurt mechs busy with someone else (or anyone attacking us)
+FFA_QUIET = True       # no crate/drone gunfire while mechs are near
+FFA_END = True         # last few alive: wait in cover inside the next circle
+FFA_DROPS = True       # skip supply drops near recently seen mechs
+FFA_SNEAK = True       # walk silently while mechs are around and nobody shoots at us
+FFA_MRM = True         # idle: go where few mechs can see us and we are nobody's nearest target
+CAND_LOAD2 = False
+CAND_CRATE = False
+CAND_RANGE = 0.0
 
 WEAPON_VALUE = {"laser": 3.0, "lightning": 2.5, "mortar": 1.6, "gun": 0.0}
 UPGRADE_ORDER = [
@@ -85,6 +96,13 @@ class Bot:
         self.loot_mem = {}         # id -> (kind, pos, last seen): weapons and cubes we saw
         self.rear_hits = {}        # attacker id -> (bearing, time) of its last hit on our back
         self.glance_until, self.glance_yaw, self.last_glance = -99.0, 0.0, -99.0
+        self.crate_mem = {}        # id -> (pos, last seen)
+        self.kills = 0
+        self.n_mechs = cfg["match"].get("mechs")
+        self.ffa = False           # free-for-all: mechs die that we did not kill
+        self.end_cover, self.end_cover_t = None, -99.0
+        self.heard_t = -99.0
+        self.mrm, self.mrm_t = None, -99.0
         gc.collect()
         gc.freeze()
 
@@ -107,6 +125,15 @@ class Bot:
         act = {"tick": obs["tick"]}
         self._events(obs)
         self._remember_loot(obs)
+        if self.n_mechs is None:
+            self.n_mechs = obs["alive"]
+        others_dead = self.n_mechs - obs["alive"] - self.kills
+        if not self.ffa and (others_dead >= 6 or (others_dead >= 3 and t < 100)):
+            self.ffa = True  # mechs die that we did not kill: everyone fights everyone
+            mf.log(f"free-for-all detected at t={t:.0f}")
+        if CAND_CRATE:
+            for c in obs.get("crates") or []:
+                self.crate_mem[c["id"]] = (tuple(c["pos"]), t)
         if obs.get("offer"):
             act["pick"] = self._pick_upgrade(obs["offer"])
 
@@ -166,6 +193,14 @@ class Bot:
             if loot is not None:
                 move, label = loot
 
+        if (FFA_SNEAK and self.ffa and final_move is None and not zone_urgent and not fight and not retreat
+                and t - self.last_dmg_t > 3.0 and label not in ("drop", "capturing", "capturing under fire")
+                and (t - self.heard_t < 6.0 or any(t - ts < 10 for _, ts in self.last_seen.values()))):
+            cap = 0.95 * self.cfg["sound"]["step_speed"] / max(1.0, me["stats"]["walk_speed"])
+            sp = math.hypot(*move)
+            if sp > cap:
+                move = (move[0] * cap / sp, move[1] * cap / sp)
+            boost = False
         if final_move is None:
             if self.escape is not None and t < self.escape_until:
                 move = self.escape
@@ -179,8 +214,9 @@ class Bot:
             aim = self._lead_aim(target)
             if fight:
                 fire = self._fire_control(target, aim, enemies, obs)
+            if CAND_FACE and fight and self.ffa:
                 g = self._glance(target, enemies)
-                if g is not None:  # look at the unseen mech hitting our back; keep a laser charge held
+                if g is not None:
                     aim = (g, 0.0)
                     fire = [bool(f) and w is not None and w["kind"] == "laser" and (w.get("charge") or 0) > 0
                             for f, w in zip(fire, me["weapons"])]
@@ -241,6 +277,8 @@ class Bot:
                             self.rear_hits[ev["by"]] = (ev["bearing"], t)
             elif et == "hit":
                 self.last_hit_t = t
+            elif et == "kill":
+                self.kills += 1
             elif et == "take_failed":
                 self.bad_pickups[ev.get("id")] = t
             elif et == "took":
@@ -249,6 +287,8 @@ class Bot:
         for s in obs.get("sounds") or []:
             k = s.get("kind")
             if k in ("gun", "laser", "laser_charge", "lightning", "mortar", "step", "boost", "jet", "reload"):
+                if s.get("dist") in ("near", "mid"):
+                    self.heard_t = t
                 w = {"near": 1.5, "mid": 1.0, "far": 0.4}.get(s.get("dist"), 0.5)
                 if k in ("step", "boost", "jet", "reload"):
                     w *= 1.3  # always close
@@ -463,6 +503,9 @@ class Bot:
             return True
         if obs["alive"] <= 3 and target["d"] < gun_range * 0.65:
             return self.hp_frac > 0.5 or health < self.hp_frac
+        if self.ffa and FFA_ENGAGE == "select":
+            busy = target["rear_angle"] > 0.9 and health < 0.75 and target["d"] < gun_range * 0.7
+            return busy and self.hp_frac > 0.6
         early = self.t < self.cfg["zone"]["phases"][0]["hold_s"]
         advantage = self.hp_frac > 0.78 and (len(weapons) > len(target.get("weapons", ())) or health < 0.65)
         return not early and advantage and target["d"] < gun_range * 0.5
@@ -745,7 +788,8 @@ class Bot:
         x, y = self.pos[0], self.pos[1]
         gx, gy = goal
         d = math.hypot(gx - x, gy - y)
-        if d < 1.5:
+        arrival = 1.5
+        if d < arrival:
             return (0.0, 0.0)
         n = self.nav
         if n is None:
@@ -764,7 +808,9 @@ class Bot:
             while len(self.path) > 1 and math.hypot(self.path[0][0] - x, self.path[0][1] - y) < 4.0:
                 self.path.pop(0)
             wx, wy = self.path[0]
-            return norm2(wx - x, wy - y)
+            if len(self.path) > 1 or math.hypot(wx - x, wy - y) >= arrival:
+                return norm2(wx - x, wy - y)
+            self.path = None  # last waypoint of a partial route, with the actual goal still ahead
         return norm2(gx - x, gy - y)
 
     def _glance(self, target, enemies):
@@ -815,7 +861,7 @@ class Bot:
         elif "laser" in wk and "gun" not in wk:
             want = 110.0
         else:
-            want = 60.0
+            want = CAND_RANGE if CAND_RANGE > 0 and "laser" in wk else 60.0
         hpf_t = self._enemy_health(tgt)
         if hpf_t < 0.25 and self.hp_frac > 0.4:
             want *= 0.7
@@ -1060,6 +1106,9 @@ class Bot:
                 continue
             if not self._in_zone_later(obs, (dx, dy), time_needed + 1):
                 continue
+            if self.ffa and FFA_DROPS and any(self.t - ts < 15 and math.hypot(p[0] - dx, p[1] - dy) < 120
+                                              for p, ts in self.last_seen.values()):
+                continue
 
             contested = False
             lanes = 0
@@ -1143,13 +1192,29 @@ class Bot:
                     self.want_jump = True
             return mv, None, "weapon"
 
+        quiet = self.ffa and FFA_QUIET and any(t - ts < 12 and math.dist(p[:2], (x, y)) < 250
+                                               for p, ts in self.last_seen.values())
+
         # crates: shoot from range
         best = None
-        for c in obs.get("crates") or []:
+        for c in ([] if quiet else obs.get("crates") or []):
             cp = c["pos"]
             dd = math.dist((x, y), cp[:2])
             if dd < 70 and ok(cp[:2]) and (best is None or dd < best[0]):
                 best = (dd, cp)
+        if CAND_CRATE and not quiet and best is None and self.hp_frac > 0.7 and \
+                not any(t - ts < 10 for _, ts in self.last_seen.values()):
+            seen_ids = {c["id"] for c in obs.get("crates") or []}
+            for cid, (cp, ts) in list(self.crate_mem.items()):
+                if t - ts > 90:
+                    del self.crate_mem[cid]
+                    continue
+                dd = math.dist((x, y), cp[:2])
+                if cid not in seen_ids and dd < 30:
+                    del self.crate_mem[cid]  # close and not listed: destroyed
+                    continue
+                if dd < 160 and ok(cp[:2]) and abs(cp[2] - self._ground(cp)) < 1 and (best is None or dd < best[0]):
+                    best = (dd, cp)
         if best:
             dd, cp = best
             self.farm_kind = "crate"
@@ -1158,7 +1223,7 @@ class Bot:
             return mv, p, "crate"
 
         # NPC drones: two cubes each, shoot from outside their aggro range
-        if self.hp_frac > 0.6 and me["cubes"] < self.cfg["cubes"]["stat_cap"] and "gun" in wk:
+        if not quiet and self.hp_frac > 0.6 and me["cubes"] < self.cfg["cubes"]["stat_cap"] and "gun" in wk:
             best = None
             for nn in npcs:
                 dd = math.dist((x, y), nn["pos"][:2])
@@ -1187,7 +1252,83 @@ class Bot:
         # nothing to do: move to the safe circle, then hold near cover
         if math.dist((x, y), zone_goal) > 3:
             return self._navigate(zone_goal), None, "rotate"
+        if self.ffa and FFA_END and obs["alive"] <= 5:
+            mv = self._endgame_spot(obs)
+            if mv is not None:
+                return mv, None, "endgame cover"
+        if self.ffa and FFA_MRM:
+            spot = self._mrm_spot(obs)
+            if spot is not None:
+                if math.dist(spot, (x, y)) > 2.5:
+                    return self._navigate(spot), None, "low risk"
+                return (0.0, 0.0), None, "low risk hold"
         return self._hold(obs), None, "hold"
+
+    def _mrm_spot(self, obs):
+        """Free-for-all: wait where few mechs can see us, far from them, and where we are nobody's nearest target."""
+        import numpy as np
+        n = self.nav
+        x, y, _ = self.pos
+        t = self.t
+        foes = [p for p, tt in self.last_seen.values() if t - tt < 20][:6]
+        if n is None or not foes:
+            return None
+        if self.mrm is not None and t - self.mrm_t < 1.5 and self._in_zone_later(obs, self.mrm, 8.0, 6.0):
+            return self.mrm
+        if not self._heavy_ok():
+            return self.mrm
+        self.heavy_used = True
+        self.mrm_t = t
+        cands = [(x, y)]
+        for r in (10.0, 20.0, 35.0):
+            for k in range(12):
+                a = k * TAU / 12 + r * 0.07
+                px, py = x + math.cos(a) * r, y + math.sin(a) * r
+                if n.is_free(px, py) and self._in_zone_later(obs, (px, py), 10.0, 8.0):
+                    cands.append((px, py))
+        A, B = [], []
+        h = self.me["stats"]["height"] * 0.55
+        for (px, py) in cands:
+            gz = n.ground_at(px, py)
+            for p in foes:
+                A.append((p[0], p[1], p[2] + self.mech["muzzle_height"]))
+                B.append((px, py, gz + h))
+        vis = n.los_many(np.array(A, np.float32), np.array(B, np.float32), step=2.0)
+        k = len(foes)
+        nearest_other = []
+        for i, p in enumerate(foes):
+            nearest_other.append(min((math.hypot(q[0] - p[0], q[1] - p[1]) for j, q in enumerate(foes) if j != i),
+                                     default=1e9))
+        best, bs = None, 1e18
+        for ci, (px, py) in enumerate(cands):
+            s = 0.01 * math.hypot(px - x, py - y)
+            for ei, p in enumerate(foes):
+                d = max(20.0, math.hypot(px - p[0], py - p[1]))
+                expo = 1.0 if vis[ci * k + ei] else 0.25
+                s += expo * 1e4 / (d * d)
+                if d < nearest_other[ei]:
+                    s += 1.5 * expo  # we would be its closest target
+            if s < bs:
+                best, bs = (px, py), s
+        self.mrm = best
+        return best
+
+    def _endgame_spot(self, obs):
+        x, y, _ = self.pos
+        t = self.t
+        recent = [(p, tt) for p, tt in self.last_seen.values() if t - tt < 30]
+        if self.nav is None or not recent:
+            return None
+        if (self.end_cover is None or t - self.end_cover_t > 2.0) and self._heavy_ok():
+            self.heavy_used = True
+            self.end_cover_t = t
+            ghosts = [{"id": -1 - k, "pos": p, "d": math.dist(p[:2], (x, y))} for k, (p, _) in enumerate(recent[:4])]
+            self.end_cover = self._find_spot(ghosts, obs, None)
+        if self.end_cover is None or not self._in_zone_later(obs, self.end_cover, 10.0, 8.0):
+            return None
+        if math.dist(self.end_cover, (x, y)) > 2.5:
+            return self._navigate(self.end_cover)
+        return (0.0, 0.0)
 
     def _heal(self, obs, zone_goal):
         """Hurt and nobody in sight: grab very close cubes, then hide from where enemies were and keep still
@@ -1231,6 +1372,8 @@ class Bot:
     def _want_weapon(self, kind, wk):
         if kind in wk or kind == "gun" or kind == "mortar":
             return False
+        if CAND_LOAD2 and "gun" in wk and len(wk) == 2 and kind in ("laser", "lightning"):
+            return True  # the gun makes room: laser + lightning
         if self.me["weapons"][1] is None or self.me["weapons"][0] is None:
             return True
         # both full: swap the worse special for a better one
@@ -1251,6 +1394,10 @@ class Bot:
             if not self._want_weapon(p["kind"], wk):
                 continue
             out = {"take": p["id"]}
+            if CAND_LOAD2 and me["weapons"][0] is not None and me["weapons"][1] is not None and "gun" in wk \
+                    and p["kind"] in ("laser", "lightning"):
+                out["drop"] = wk["gun"][0]
+                return out
             if me["weapons"][0] is not None and me["weapons"][1] is not None:
                 specials = [(k, i) for k, (i, w) in wk.items() if k != "gun"]
                 k, i = min(specials, key=lambda s: WEAPON_VALUE.get(s[0], 0))
