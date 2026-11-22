@@ -107,9 +107,6 @@ class Bot:
         self.kills = 0
         self.n_mechs = cfg["match"].get("mechs")
         self.ffa = False           # free-for-all: mechs die that we did not kill
-        self.prac_stick_id, self.prac_stick_t = None, -99.0   # practice target stickiness
-        self.prac_lose_t = -99.0                              # practice retreat latch
-        self.lethal_k = 0.95                                  # laser early-release damage factor
         self.end_cover, self.end_cover_t = None, -99.0
         self.heard_t = -99.0
         self.mrm, self.mrm_t = None, -99.0
@@ -161,8 +158,6 @@ class Bot:
 
         zone_goal, zone_urgent = self._zone_goal(obs)
         self._measure_threats(enemies)
-        if not self.ffa:
-            return self._practice_act(obs, enemies, npcs, zone_goal, zone_urgent, act)
         target = self._choose_target(enemies)
         if target is not None and not self.ffa and not target["clear"] and self.nav is not None:
             self._aim_at_exposed_height(target)
@@ -613,7 +608,7 @@ class Bot:
                 cube_bonus = 1 + cubes["damage_per_cube"] * min(self.me["cubes"], cubes["stat_cap"])
                 fraction = min(1.0, charge / stats["charge"])
                 damage = stats["damage"] * (stats["min_frac"] + (1 - stats["min_frac"]) * fraction)
-                self.laser_lethal = hp <= self.lethal_k * damage * cube_bonus * self.laser_damage_floor
+                self.laser_lethal = hp <= 0.95 * damage * cube_bonus * self.laser_damage_floor
             if self.laser_lethal or charge >= stats["charge"] - self.decision_span:
                 return self.direct_aim
         return self.gun_solution[0] if self.gun_solution else self.direct_aim
@@ -1133,7 +1128,7 @@ class Bot:
         cubes = self.cfg["cubes"]
         missing_cubes = max(0, cubes["stat_cap"] - self.me["cubes"])
         gain = (1 - self.hp_frac) * info["repair"] + min(missing_cubes, info["cubes"]) * cubes["hp_per_cube"] * 2
-        if gain < 0.05:
+        if gain < 0.02:
             return None
 
         x, y, _ = self.pos
@@ -1146,7 +1141,7 @@ class Bot:
             progress = drop["progress"] if drop["holder"] == self.me["id"] else 0
             capture = drop["capture_s"] - progress
             time_needed = max(eta, drop["lands_in"]) + capture
-            if time_needed > 9 + gain * 12 or drop["lands_in"] > eta + 5:
+            if time_needed > 30 + gain * 20 or drop["lands_in"] > eta + 20:
                 continue
             if not self._in_zone_later(obs, (dx, dy), time_needed + 1):
                 continue
@@ -1169,7 +1164,8 @@ class Bot:
                     (dx, dy, dz + stats["height"] / 2),
                 ):
                     lanes += 1
-            if contested or lanes > 1 or (lanes and time_needed > 7 + gain * 4):
+            if contested and any(self._enemy_health(e) > 0.2 for e in enemies
+                                 if math.hypot(e["pos"][0] - dx, e["pos"][1] - dy) < radius * 1.25):
                 continue
             score = (gain + progress / drop["capture_s"]) / (1 + time_needed + 2 * lanes)
             if best is None or score > best[0]:
@@ -1242,7 +1238,7 @@ class Bot:
         self.farm_kind = None
         wk = self._weapons()
         ok = lambda p: self._in_zone_later(obs, p, 10.0, 10.0)
-        hurt = self.hp_frac < 0.65
+        hurt = self.hp_frac < 0.80
 
         if hurt:
             return self._heal(obs, zone_goal)
@@ -1355,259 +1351,6 @@ class Bot:
                     return self._navigate(spot), None, "low risk"
                 return (0.0, 0.0), None, "low risk hold"
         return self._hold(obs), None, "hold"
-
-    # =============================================================== practice squad
-    def _prac_los(self, e):
-        """Line of fire to a mech: centre first, then its upper body."""
-        if self.nav is None:
-            e["aim_height"] = 0.5
-            return True
-        x, y, z = self.pos
-        ex, ey, ez = e["pos"]
-        height = self.mech["height"] * self._size(e)
-        origin = (x, y, z + self.muzzle)
-        for frac in (0.5, 0.85):
-            if self.nav.los(origin, (ex, ey, ez + height * frac)):
-                e["aim_height"] = frac
-                return True
-        return False
-
-    def _practice_target(self, enemies, late):
-        """Pick the mech to fight: only ones we have a line to, and only those that are hunting us,
-        are close, are hurt, or the endgame has opened. Score prefers close, hurt and already-engaged
-        targets, with 2 s of stickiness."""
-        me, t = self.me, self.t
-        x, y = self.pos[0], self.pos[1]
-        best, best_s = None, None
-        for e in enemies:
-            if e["d"] > 240.0:
-                continue
-            if not self._prac_los(e):
-                continue
-            max_hp = e.get("max_hp") or self.mech["hp"]
-            hp = e.get("hp")
-            if hp is None:
-                hp = max_hp
-            hpf = hp / max(1.0, max_hp)
-            ex, ey = e["pos"][0], e["pos"][1]
-            evx, evy = e["vel"][0] - me["vel"][0], e["vel"][1] - me["vel"][1]
-            closing = -(evx * (x - ex) + evy * (y - ey)) / max(1.0, e["d"])
-            aiming = False
-            ea = e.get("aim")
-            if ea:
-                aiming = abs(wrap(ea[0] - math.atan2(y - ey, x - ex))) < 0.22
-            engage = (e["d"] < 60.0 or t - self.attackers.get(e["id"], -1e9) < 6.0 or late
-                      or (closing > 3.0 and e["d"] < 180.0) or (hpf < 0.40 and e["d"] < 160.0)
-                      or (aiming and e["d"] < 190.0))
-            if not engage:
-                continue
-            score = e["d"] + 0.18 * hp
-            if hpf <= 0.30:
-                score -= 200.0
-            if e["id"] == self.prac_stick_id and t - self.prac_stick_t < 2.0:
-                score -= 200.0
-            if t - self.attackers.get(e["id"], -1e9) < 4.0:
-                score -= 40.0
-            if closing > 3.0:
-                score -= 15.0
-            if best is None or score < best_s:
-                best, best_s = e, score
-        if best is not None:
-            self.prac_stick_id, self.prac_stick_t = best["id"], t
-        return best
-
-    def _prac_range(self, tgt, wk, their):
-        """Preferred fighting distance against the squad: the laser is hitscan while their guns lose
-        accuracy with range; lightning wants to be close."""
-        if tgt.get("kind") == "npc":
-            return 58.0
-        if "lightning" in wk and self.me["energy"] > 12:
-            rng = 28.0
-        elif "laser" in wk:
-            rng = 120.0
-        else:
-            rng = 85.0
-        if "lightning" not in wk:
-            if "lightning" in their:
-                rng = max(rng, 64.0)
-            if "mortar" in their:
-                rng = max(rng, 80.0)
-        return rng
-
-    def _practice_duel_move(self, tgt, enemies, obs, wk, their, hpf_t, crowd):
-        """Sample the 16 directions around us plus standing still; keep the preferred range and line of
-        fire, stay out of other mechs' lines, follow the closing circle and strafe sideways."""
-        import numpy as np
-        n = self.nav
-        x, y, z = self.pos
-        t = self.t
-        if n is None:
-            return norm2(tgt["pos"][0] - x, tgt["pos"][1] - y)
-        finish = hpf_t < 0.38 and self.hp_frac > 0.42 and crowd <= 2
-        if tgt.get("kind") == "npc":
-            want = 58.0
-        elif finish:
-            want = 20.0
-        else:
-            want = self._prac_range(tgt, wk, their)
-        want_los = 1.0
-        if "laser" not in wk and "lightning" not in wk:
-            g = wk.get("gun")
-            if g is not None and (g[1].get("ammo", 0) == 0 or g[1].get("reload", 0) > 0):
-                want_los = -1.0
-        if t >= self.strafe_until:
-            if self.rng.random() < 0.6:
-                self.strafe = -self.strafe
-            self.strafe_until = t + 0.3 + self.rng.random() * 0.7
-        tx, ty, tz = tgt["pos"]
-        th = self.mech["height"] * self._size(tgt)
-        centre = (tx, ty, tz + th * 0.5)
-        ux, uy = norm2(tx - x, ty - y)
-        sx, sy = -uy * self.strafe, ux * self.strafe
-        mz = self.muzzle
-        cands = [(x, y, 0.0, 0.0, z, 0.0)]
-        for k in range(16):
-            a = k * TAU / 16
-            dx, dy = math.cos(a), math.sin(a)
-            cx, cy = x + dx * 6.0, y + dy * 6.0
-            if not n.is_free(cx, cy) or not n.walk_clear((x, y), (cx, cy)):
-                continue
-            cands.append((cx, cy, dx, dy, n.ground_at(cx, cy), 6.0))
-        if len(cands) < 2:
-            return (0.0, 0.0)
-        A = np.array([(c[0], c[1], c[4] + mz) for c in cands], np.float32)
-        B = np.array([centre] * len(cands), np.float32)
-        los_t = n.los_many(A, B)
-        foes = [e for e in enemies if e is not tgt and e["d"] < 170.0 and e.get("clear")][:4]
-        expo = np.zeros(len(cands), np.int32)
-        if foes:
-            eye = np.array([(e["pos"][0], e["pos"][1], e["pos"][2] + mz * self._size(e)) for e in foes], np.float32)
-            body = np.array([(c[0], c[1], c[4] + self.mech["height"] * 0.6) for c in cands], np.float32)
-            AA = np.repeat(eye[None, :, :], len(cands), axis=0).reshape(-1, 3)
-            BB = np.repeat(body[:, None, :], len(foes), axis=1).reshape(-1, 3)
-            expo = n.los_many(AA, BB, step=2.4).reshape(len(cands), len(foes)).sum(1)
-        zc, zr = self._zone_circle_at(obs["zone"], t + 2.0)
-        cube = None
-        for c in obs.get("cubes") or ():
-            cp = c["pos"]
-            if abs(cp[2] - z) < 4.0:
-                dd = math.hypot(cp[0] - x, cp[1] - y)
-                if dd < 40.0 and (cube is None or dd < cube[0]):
-                    cube = (dd, cp)
-        best_s, best = None, (0.0, 0.0)
-        for i, (cx, cy, dx, dy, cz, ring) in enumerate(cands):
-            dist = max(1.0, math.hypot(tx - cx, ty - cy))
-            score = -1.1 * abs(dist - want) - 0.4 * ring
-            if los_t[i]:
-                score += 45.0 * want_los
-            score -= 30.0 * float(expo[i])
-            if math.hypot(cx - zc[0], cy - zc[1]) > zr - 12.0:
-                score -= 60.0
-            if cube is not None:
-                score += 1.5 * (cube[0] - math.hypot(cube[1][0] - cx, cube[1][1] - cy))
-            ci, cj = n.cell(cx, cy)
-            clearance = float(n.clear[cj, ci]) * 2.0
-            if clearance < 4.0:
-                score -= (4.0 - clearance) * 2.5
-            if want_los > 0:
-                score += 9.0 * (dx * sx + dy * sy)
-            if i == 0:
-                score -= 8.0
-                if want_los < 0 and not los_t[0]:
-                    score += 14.0
-            if best_s is None or score > best_s:
-                best_s, best = score, (dx, dy)
-        return self._clamp(best[0], best[1])
-
-    def _practice_act(self, obs, enemies, npcs, zone_goal, zone_urgent, act):
-        t = self.t
-        self.lethal_k = 0.70  # release a laser as soon as the charge is almost certainly lethal
-        me = self.me
-        late = obs["zone"]["next_radius"] <= 70 or obs["alive"] <= 3
-        target = self._practice_target(enemies, late)
-        fight = target is not None
-        hpf_t = self._enemy_health(target) if target else 1.0
-        crowd = sum(1 for e in enemies if e["d"] < 170)
-        finishing = bool(target and target["d"] < 120
-                         and ((target.get("hp") or 1e9) < 200 or hpf_t < 0.5 * self.hp_frac))
-
-        # retreat latch: short cover runs only, never a healing camp
-        if self.hp_frac < 0.38 and t - self.last_dmg_t < 2.0:
-            self.prac_lose_t = t
-        near = [e for e in enemies if e["d"] < 160 and e.get("clear")]
-        losing = (len(near) >= 2 and self.hp_frac < 0.55) or (len(near) >= 3 and self.hp_frac < 0.80)
-        if target is not None:
-            if self.hp_frac < 0.35 and hpf_t > self.hp_frac + 0.1:
-                losing = True
-            if hpf_t < 0.25 and self.hp_frac > 0.20 and len(near) <= 2:
-                losing = False
-        if losing:
-            self.prac_lose_t = t
-        retreat = (t - self.prac_lose_t < 1.5) and not late
-
-        wk = self._weapons()
-        their = (target.get("weapons") if target else None) or []
-
-        move = (0.0, 0.0)
-        boost = False
-        aim_point = None
-        label = ""
-        final_move = self._final_approach(obs["zone"], fight)
-        if final_move is not None:
-            move = final_move
-            label = "final center"
-        elif zone_urgent:
-            move = self._navigate(zone_goal)
-            boost = (not me["in_zone"]) or self._outside_soon(obs)
-            label = "zone"
-        elif retreat and not finishing:
-            move, label = self._retreat(enemies, zone_goal, obs)
-            boost = me["energy"] > 10 and (move[0] != 0.0 or move[1] != 0.0)
-        elif target is not None:
-            move = self._practice_duel_move(target, enemies, obs, wk, their, hpf_t, crowd)
-            label = f"fight {target['id']}"
-        else:
-            supply = self._supply_move(obs, enemies)
-            if supply is not None:
-                move, label = supply
-            else:
-                move, aim_point, label = self._peaceful(obs, npcs, zone_goal)
-
-        fire = [False, False]
-        aim = None
-        if target is not None:
-            self.target_los = True
-            aim = self._lead_aim(target)
-            if fight:
-                fire = self._fire_control(target, aim, enemies, obs)
-        if aim is None and aim_point is not None:
-            aim = self._aim_at_point(aim_point)
-            fire = self._fire_at_object(aim, aim_point, obs)
-        if aim is None:
-            aim = self._idle_aim(obs, move)
-        st = me["stats"]
-        act["aim"] = [wrap(aim[0]), max(st["min_pitch"], min(st["max_pitch"], aim[1]))]
-        act["fire"] = fire
-        self._reload(act, target)
-
-        jump, jet = self._unstick(move)
-        if jet:
-            boost = True
-        if jump or (self.want_jump and me["grounded"]):
-            act["jump"] = True
-        if boost and me["grounded"] and (me["energy"] < 12 or
-                                         (math.hypot(*me["vel"][:2]) < 3 and self.hist and t - self.hist[0][0] > 0.5)):
-            boost = False
-        move = self._dodge(obs, move)
-        move = self._keep_in_zone(obs, move)
-        tk = self._take(obs)
-        if tk:
-            act.update(tk)
-        act["move"] = [round(move[0], 3), round(move[1], 3)]
-        act["boost"] = bool(boost)
-        mf.draw.label(f"{label} hp{int(me['hp'])}")
-        self.prev_hp = me["hp"]
-        return act
 
     def _mrm_spot(self, obs):
         """Free-for-all: wait where few mechs can see us, far from them, and where we are nobody's nearest target."""
