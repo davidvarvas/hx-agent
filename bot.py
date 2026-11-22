@@ -608,7 +608,7 @@ class Bot:
                 cube_bonus = 1 + cubes["damage_per_cube"] * min(self.me["cubes"], cubes["stat_cap"])
                 fraction = min(1.0, charge / stats["charge"])
                 damage = stats["damage"] * (stats["min_frac"] + (1 - stats["min_frac"]) * fraction)
-                self.laser_lethal = hp <= 0.95 * damage * cube_bonus * self.laser_damage_floor
+                self.laser_lethal = hp <= 0.75 * damage * cube_bonus * self.laser_damage_floor
             if self.laser_lethal or charge >= stats["charge"] - self.decision_span:
                 return self.direct_aim
         return self.gun_solution[0] if self.gun_solution else self.direct_aim
