@@ -900,7 +900,7 @@ class Bot:
         elif "laser" in wk and "gun" not in wk:
             want = 110.0
         else:
-            want = CAND_RANGE if CAND_RANGE > 0 and "laser" in wk else 60.0
+            want = CAND_RANGE if CAND_RANGE > 0 and "laser" in wk else 90.0
         hpf_t = self._enemy_health(tgt)
         if hpf_t < 0.25 and self.hp_frac > 0.4:
             want *= 0.7
